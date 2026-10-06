@@ -23,6 +23,24 @@ The GNS3 web interface also displays the topology; the desktop GUI is not requir
 
 The managed project has `auto_close` disabled so closing/disconnecting its topology page does not stop the nodes. Host sleep still interrupts live capture connections; reconnect the capture session afterward. No Windows power or security settings were changed.
 
+## Share The Topology
+
+The ready-to-import [portable GNS3 project](HIoT-Mini-Hospital-Expanded.gns3project) contains the 16 actors, 3 switches, and 18 links. It is a topology export, not a VM image or a prebuilt Docker image; it has no packet captures. Each teammate needs a GNS3 2.2.x VM/Linux Docker compute and must build `iomt-hospital:2` from `gns3-hospital-v2-image-source.zip` as described below.
+
+1. Build the Docker image on that teammate's GNS3 Linux compute. The project references the exact tag `iomt-hospital:2`.
+2. In the GNS3 project list, choose **Import Project** (or **File > Import portable project** in the desktop GUI) and select `HIoT-Mini-Hospital-Expanded.gns3project`. This is a project, not an appliance.
+3. Run `run-live-iomt.cmd` once to prepare `.venv` and open the console, but do not start a capture session yet. In a fresh checkout, register the imported project using the name shown by GNS3. Replace the example address with that teammate's private VM IP:
+
+```powershell
+.\.venv\Scripts\python.exe attach_topology.py --gns3 http://192.168.56.101 --project-name "HIoT Mini Hospital Expanded 20261006-144322"
+```
+
+If GNS3 renamed the project during import, pass its actual name, or use `--project-id` with the ID shown by the GNS3 controller. The command validates every actor, switch, image tag, and link before writing `runs/gns3-hospital-v2-manifest.json`. It refuses to overwrite an existing manifest; keep separate checkouts or runs folders for separate labs.
+
+4. In the console, select **GNS3 routed lab**, enter the same private GNS3 URL, and select **Start session**. The console will reuse the imported project and capture its actor links. **Start normal traffic** to populate packet-derived inventory; use **Verify clinical paths** to check fresh service receipts.
+
+Starting a GNS3 session without importing or registering this archive remains supported: the adapter builds an equivalent new project automatically. The portable export is provided so teammates can see and share the exact topology, not because the builder requires it.
+
 ## Run Now: Native Live Capture
 
 1. Open `D:\FYP\iomt-live\run-live-iomt.cmd`. It prepares an isolated Python environment and opens `http://127.0.0.1:8877/`.

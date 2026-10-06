@@ -102,6 +102,54 @@ class GNS3:
     def api(self, endpoint, data=None):
         return request_json(self.url + "/v2" + endpoint, data, self.headers)
 
+    def attach_imported(self, project_id):
+        """Register an imported portable project only after validating its full lab wiring."""
+        if (self.folder / MANIFEST_FILE).exists():
+            raise ValueError(f"{MANIFEST_FILE} already exists. Keep the current lab; use a fresh runs folder to attach another project.")
+        version = self.api("/version")
+        if not str(version.get("version", "")).startswith("2.2."):
+            raise ValueError("This adapter requires GNS3 2.2.x")
+        project = self.api(f"/projects/{project_id}")
+        nodes = self.api(f"/projects/{project_id}/nodes")
+        links = self.api(f"/projects/{project_id}/links")
+        roles, switches = {}, {}
+        for node in nodes:
+            properties = node.get("properties", {})
+            if node.get("node_type") == "docker":
+                environment = dict(line.split("=", 1) for line in properties.get("environment", "").splitlines() if "=" in line)
+                role = environment.get("LAB_ROLE")
+                if (role not in ROLES or role in roles or environment.get("LAB_MODE") != "gns3"
+                        or properties.get("image") != IMAGE or node.get("console_type") != "http"):
+                    raise ValueError(f"Unexpected or duplicate Docker actor in imported project: {node.get('name')}")
+                roles[role] = node["node_id"]
+            elif node.get("node_type") == "ethernet_switch":
+                name = "".join(character for character in node.get("name", "").lower() if character.isalnum())
+                zone = next((zone for zone in ("staff", "medical", "services") if name == zone + "switch"), None)
+                if zone is None or zone in switches:
+                    raise ValueError(f"Unexpected or duplicate switch in imported project: {node.get('name')}")
+                switches[zone] = node["node_id"]
+            else:
+                raise ValueError(f"Unexpected node type in imported project: {node.get('node_type')}")
+        if set(roles) != set(ROLES) or set(switches) != {"staff", "medical", "services"} or len(links) != len(ROLES) + 2:
+            raise ValueError("Imported project must contain exactly the 16 hospital actors, 3 switches, and 18 links")
+
+        def matching_link(first, second):
+            matches = [link for link in links if {endpoint["node_id"] for endpoint in link.get("nodes", [])} == {first, second}]
+            if len(matches) != 1:
+                raise ValueError(f"Expected one link between {first} and {second}; found {len(matches)}")
+            return matches[0]["link_id"]
+
+        actor_links = {role: matching_link(node_id, switches[ROLES[role]["zone"]])
+                       for role, node_id in roles.items() if role != "gateway"}
+        gateway_links = {zone: matching_link(roles["gateway"], switch_id) for zone, switch_id in switches.items()}
+        if len(set((*actor_links.values(), *gateway_links.values()))) != len(links):
+            raise ValueError("Imported project has unexpected or repeated wiring")
+        self.manifest = {"server": self.url, "project_id": project["project_id"], "project_name": project["name"],
+                         "nodes": roles, "links": actor_links, "switches": switches,
+                         "gateway_links": gateway_links, "complete": True}
+        self.save()
+        return self.manifest
+
     def build(self):
         version = self.api("/version")
         if not str(version.get("version", "")).startswith("2.2."):

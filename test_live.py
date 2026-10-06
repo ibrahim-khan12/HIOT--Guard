@@ -1,8 +1,11 @@
+import json
 import os
 import tempfile
 import threading
 import time
 import unittest
+import zipfile
+from pathlib import Path
 from unittest.mock import patch, Mock
 from agent import Agent, synthetic_image
 from config import CAPTURE_ROLES, NORMAL_ROLES, ROLES, address, expected, registry
@@ -23,6 +26,38 @@ def packet(src, dst, port, source_port=40000, at=None, payload="", **extra):
 
 
 class EngineTests(unittest.TestCase):
+    def test_portable_topology_can_be_attached_without_rebuilding(self):
+        archive_path = Path(__file__).with_name("HIoT-Mini-Hospital-Expanded.gns3project")
+        with zipfile.ZipFile(archive_path) as archive:
+            self.assertIsNone(archive.testzip())
+            self.assertFalse(any(name.endswith((".pcap", ".pcapng")) for name in archive.namelist()))
+            project = json.loads(archive.read("project.gns3"))
+        nodes = project["topology"]["nodes"]
+        links = project["topology"]["links"]
+        self.assertEqual((len(nodes), len(links)), (19, 18))
+
+        def api(endpoint, data=None):
+            if endpoint == "/version":
+                return {"version": "2.2.61"}
+            if endpoint == f"/projects/{project['project_id']}":
+                return project
+            if endpoint.endswith("/nodes"):
+                return nodes
+            if endpoint.endswith("/links"):
+                return links
+            raise AssertionError(endpoint)
+
+        with tempfile.TemporaryDirectory() as folder:
+            adapter = GNS3("http://192.168.209.142", folder)
+            with patch.object(adapter, "api", side_effect=api):
+                manifest = adapter.attach_imported(project["project_id"])
+                with self.assertRaisesRegex(ValueError, "already exists"):
+                    adapter.attach_imported(project["project_id"])
+            self.assertEqual(set(manifest["nodes"]), set(ROLES))
+            self.assertEqual(set(manifest["links"]), set(ROLES) - {"gateway"})
+            self.assertEqual(set(manifest["gateway_links"]), {"staff", "medical", "services"})
+            self.assertTrue((adapter.folder / MANIFEST_FILE).exists())
+
     def test_hospital_registry_and_expected_paths(self):
         self.assertEqual(len(ROLES), 16)
         self.assertEqual(len(CAPTURE_ROLES), 13)
