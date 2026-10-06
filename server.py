@@ -12,7 +12,7 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from config import AGENT_PORTS, ROLES, address
+from config import AGENT_PORTS, CAPTURE_ROLES, NORMAL_ROLES, ROLES, address
 from gns3 import GNS3, request_json
 from monitor import Capture, Engine
 
@@ -59,13 +59,13 @@ class Lab:
         self.mode = mode
         try:
             if mode == "local":
-                for role in ("pacs", "ehr", "workstation", "pump", "modality"):
+                for role in ("pacs", "ehr", *CAPTURE_ROLES):
                     with socket.socket() as check:
                         try:
                             check.bind(("127.0.0.1", AGENT_PORTS[role]))
                         except OSError as error:
                             raise RuntimeError(f"Management port {AGENT_PORTS[role]} is already in use. Stop the other live lab first.") from error
-                for role in ("pacs", "ehr", "workstation", "pump", "modality"):
+                for role in ("pacs", "ehr", *CAPTURE_ROLES):
                     log = (self.session / (role + ".log")).open("w")
                     child = subprocess.Popen([sys.executable, str(ROOT / "agent.py"), "--role", role, "--mode", "local",
                                               "--port", str(AGENT_PORTS[role])], stdout=log, stderr=log,
@@ -73,7 +73,7 @@ class Lab:
                     log.close()
                     self.children.append(child)
                     self.owned_roles.add(role)
-                for role in ("pacs", "ehr", "workstation", "pump", "modality"):
+                for role in ("pacs", "ehr", *CAPTURE_ROLES):
                     for _ in range(50):
                         try:
                             self.agent(role, "/state")
@@ -91,7 +91,7 @@ class Lab:
                 self.adapter.build()
                 self.adapter.start()
                 self.policy = self.agent("gateway", "/state")["policy"]
-                for role in ("workstation", "pump", "modality"):
+                for role in CAPTURE_ROLES:
                     self.captures.append(Capture(self.engine, self.session / (role + ".pcap"), stream=self.adapter.stream(role), name=role))
             else:
                 raise ValueError("Unknown lab mode")
@@ -133,7 +133,7 @@ class Lab:
         if self.mode == "gns3":
             proof = self.agent("gateway", "/policy", payload)
         else:
-            proof = [self.agent(target, "/policy", payload) for target in ("pacs", "ehr")]
+            proof = [self.agent(target, "/policy", payload) for target in ("pacs", "ehr", "pump")]
         self.policy = desired
         if reviewer:
             self.approval = {"reviewer": reviewer.strip(), "time": time.time(), "authenticated": False}
@@ -153,17 +153,19 @@ class Lab:
             return {"operation": operation, "success": True}
         if not self.mode:
             raise ValueError("Start a capture session first")
-        if operation in ("normal", "recon", "anomaly") and any(c.process.poll() is not None or c.error for c in self.captures):
+        if operation in ("normal", "recon", "anomaly", "unknown") and any(c.process.poll() is not None or c.error for c in self.captures):
             raise ValueError("The packet capture is no longer healthy. Stop and restart the session before generating more traffic.")
         if operation in ("normal", "pause"):
             result = {role: self.agent(role, "/action", {"action": "start" if operation == "normal" else "stop"})
-                      for role in ("workstation", "pump", "modality")}
+                      for role in NORMAL_ROLES}
         elif operation == "recon":
             result = self.agent("workstation", "/action", {"action": "recon"})
         elif operation == "anomaly":
             result = self.agent("pump", "/action", {"action": "anomaly"})
+        elif operation == "unknown":
+            result = self.agent("unregistered", "/action", {"action": "probe"})
         elif operation == "verify":
-            result = {role: self.agent(role, "/action", {"action": "probe"}) for role in ("workstation", "pump", "modality")}
+            result = {role: self.agent(role, "/action", {"action": "probe"}) for role in NORMAL_ROLES}
         elif operation == "approve":
             self.enforce(address("pump", self.mode), "isolated", str(data.get("reviewer", "")))
             result = {"approved": True, "authenticated": False}
@@ -171,13 +173,13 @@ class Lab:
             self.generation += 1
             generation = self.generation
             self.engine.respond = lambda ip, policy: self.jobs.put((ip, policy, None, generation))
-            for role in ("workstation", "pump", "modality"):
+            for role in NORMAL_ROLES:
                 self.agent(role, "/action", {"action": "stop"})
             # Reset is a new incident window, not fabricated historical packet evidence.
             if self.mode == "gns3":
                 self.agent("gateway", "/policy", {"workstation": "normal", "pump": "normal"})
             else:
-                for role in ("pacs", "ehr"):
+                for role in ("pacs", "ehr", "pump"):
                     self.agent(role, "/policy", {"workstation": "normal", "pump": "normal"})
             self.policy = {"workstation": "normal", "pump": "normal"}
             self.approval = None
@@ -196,7 +198,7 @@ class Lab:
     def status(self, endpoints=True):
         states = {}
         if self.mode and endpoints:
-            for role in ("pacs", "ehr", "workstation", "pump", "modality") + (("gateway",) if self.mode == "gns3" else ()):
+            for role in ("pacs", "ehr", *CAPTURE_ROLES) + (("gateway",) if self.mode == "gns3" else ()):
                 try:
                     states[role] = self.agent(role, "/state")
                 except Exception as error:
@@ -220,7 +222,7 @@ class Lab:
             except OSError as error:
                 self.engine.event("REPORT SAVE ERROR", str(error))
         if self.mode:
-            for role in ("workstation", "pump", "modality"):
+            for role in NORMAL_ROLES:
                 if self.mode == "local" and role not in self.owned_roles:
                     continue
                 try:

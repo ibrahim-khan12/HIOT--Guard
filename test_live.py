@@ -4,9 +4,9 @@ import threading
 import time
 import unittest
 from unittest.mock import patch, Mock
-from agent import Agent
-from config import address
-from gns3 import GNS3, private_url, request_json
+from agent import Agent, synthetic_image
+from config import CAPTURE_ROLES, NORMAL_ROLES, ROLES, address, expected, registry
+from gns3 import GNS3, IMAGE, MANIFEST_FILE, private_url, request_json
 from monitor import Capture, Engine
 from server import Lab
 from verify_gns3 import dropped_packets
@@ -23,6 +23,51 @@ def packet(src, dst, port, source_port=40000, at=None, payload="", **extra):
 
 
 class EngineTests(unittest.TestCase):
+    def test_hospital_registry_and_expected_paths(self):
+        self.assertEqual(len(ROLES), 16)
+        self.assertEqual(len(CAPTURE_ROLES), 13)
+        self.assertNotIn(address("unregistered", "gns3"), registry("gns3"))
+        for role, service, port in (("modality", "pacs", 11112), ("ultrasound", "pacs", 11112),
+                                    ("pump", "ehr", 2575), ("monitor", "ehr", 2575),
+                                    ("lab_analyzer", "ehr", 2575), ("mri", "pacs", 11112),
+                                    ("xray", "pacs", 11112), ("ventilator", "ehr", 2575),
+                                    ("dialysis", "ehr", 2575), ("ecg", "ehr", 2575),
+                                    ("vendor", "pump", 8082)):
+            self.assertTrue(expected(role, address(service, "gns3"), port, "gns3"))
+        self.assertFalse(expected("unregistered", address("ehr", "gns3"), 8081, "gns3"))
+
+    def test_four_synthetic_imaging_modalities_are_distinct(self):
+        for role, modality in (("modality", "CT"), ("ultrasound", "US"), ("mri", "MR"), ("xray", "DX")):
+            self.assertEqual(synthetic_image(role).Modality, modality)
+        self.assertEqual(synthetic_image("modality").PatientID, "LAB_ONLY")
+
+    def test_new_gns3_project_contains_real_actor_links(self):
+        with tempfile.TemporaryDirectory() as folder:
+            adapter = GNS3("http://192.168.209.142", folder)
+            created = []
+            def api(endpoint, data=None):
+                if endpoint == "/version":
+                    return {"version": "2.2.61"}
+                if endpoint == "/computes":
+                    return [{"compute_id": "vm", "connected": True, "capabilities": {"platform": "linux", "node_types": ["docker"]}}]
+                if endpoint == "/projects":
+                    return {"project_id": "fresh", "name": data["name"]}
+                if endpoint.endswith("/nodes"):
+                    created.append(data)
+                    return {"node_id": f"node-{len(created)}"}
+                if endpoint.endswith("/links"):
+                    return {"link_id": f"link-{len(adapter.manifest['links']) + len(adapter.manifest['gateway_links'])}"}
+                return {}
+            with patch.object(adapter, "api", side_effect=api):
+                manifest = adapter.build()
+            self.assertEqual(set(manifest["nodes"]), set(ROLES))
+            self.assertEqual(set(manifest["links"]), set(ROLES) - {"gateway"})
+            self.assertEqual(len(manifest["switches"]), 3)
+            medical_switch = next(n for n in created if n["node_type"] == "ethernet_switch" and n["name"] == "medical switch")
+            self.assertEqual(len(medical_switch["properties"]["ports_mapping"]), 16)
+            self.assertTrue((adapter.folder / MANIFEST_FILE).exists())
+            self.assertTrue(all(n["properties"]["image"] == IMAGE for n in created if n["node_type"] == "docker"))
+
     def test_background_command_retries_do_not_repeat_probes(self):
         agent = Agent("workstation", "local")
         release, entered = threading.Event(), threading.Event()
@@ -274,6 +319,13 @@ class RealTrafficTests(unittest.TestCase):
                 self.wait_until(lambda: any("HL7/MLLP" in a["protocols"] for a in lab.engine.assets.values()), "HL7 payload evidence")
                 baseline = lab.action({"action": "verify"})["result"]
                 self.assertTrue(all(r["success"] for r in baseline.values()))
+                self.assertEqual(set(baseline), set(NORMAL_ROLES))
+                self.assertGreaterEqual(lab.agent("pacs", "/state")["counters"]["dicom_store"], 4)
+                self.assertGreaterEqual(lab.agent("ehr", "/state")["counters"]["hl7_received"], 6)
+                self.assertGreaterEqual(lab.agent("pump", "/state")["counters"]["maintenance_received"], 1)
+                self.assertTrue(lab.action({"action": "unknown"})["result"]["success"])
+                self.wait_until(lambda: address("unregistered", "local") in lab.engine.assets, "unknown asset in PCAP")
+                self.assertFalse(lab.engine.assets[address("unregistered", "local")]["registered"])
                 lab.action({"action": "recon"})
                 self.wait_until(lambda: lab.policy["workstation"] == "quarantined", "traffic-driven quarantine")
                 after = lab.action({"action": "verify"})["result"]
@@ -284,6 +336,7 @@ class RealTrafficTests(unittest.TestCase):
                 self.wait_until(lambda: lab.policy["pump"] == "restricted", "pump safety restriction")
                 restricted = lab.action({"action": "verify"})["result"]
                 self.assertTrue(restricted["pump"]["success"])
+                self.assertFalse(restricted["vendor"]["success"])
                 with self.assertRaises(ValueError):
                     lab.action({"action": "approve", "reviewer": ""})
                 lab.action({"action": "approve", "reviewer": "Test reviewer"})

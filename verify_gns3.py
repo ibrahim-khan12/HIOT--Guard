@@ -3,6 +3,7 @@ import argparse
 import json
 import time
 from pathlib import Path
+from config import CAPTURE_ROLES, NORMAL_ROLES, address
 from gns3 import private_url, request_json
 
 
@@ -44,8 +45,9 @@ def verify(backend, controller, output):
         print("PASS:", label, flush=True)
         return state
 
-    def require_paths(results, workstation, pump, modality=True):
-        expected = {"workstation": workstation, "pump": pump, "modality": modality}
+    def require_paths(results, workstation, pump, vendor=True):
+        expected = {role: True for role in NORMAL_ROLES}
+        expected.update(workstation=workstation, pump=pump, vendor=vendor)
         for role, success in expected.items():
             if results[role]["success"] is not success:
                 raise AssertionError(f"{role}: expected success={success}, got {results[role]}")
@@ -60,18 +62,33 @@ def verify(backend, controller, output):
             action("start-gns3", url=controller)
         action("reset")
         state = get("/api/status")
-        if len(state["capture"]) != 3 or any(not c["running"] or c["error"] for c in state["capture"]):
-            raise AssertionError("Three healthy GNS3 packet streams are required")
-        record("GNS3 nodes and three actual capture streams connected")
+        if len(state["capture"]) != len(CAPTURE_ROLES) or any(not c["running"] or c["error"] for c in state["capture"]):
+            raise AssertionError(f"{len(CAPTURE_ROLES)} healthy GNS3 packet streams are required")
+        record("Mini-hospital nodes and actor-link packet streams connected")
 
         action("normal")
-        wait_for(lambda s: len(s["monitor"]["assets"]) >= 5 and
+        wait_for(lambda s: len(s["monitor"]["assets"]) >= len(NORMAL_ROLES) + 2 and
                  any("DICOM" in a["protocols"] for a in s["monitor"]["assets"]) and
                  any("HL7/MLLP" in a["protocols"] for a in s["monitor"]["assets"]),
                  "live DICOM and HL7 evidence")
         baseline = action("verify")["result"]
         require_paths(baseline, True, True)
+        state = get("/api/status")
+        observed = {asset["role"]: asset for asset in state["monitor"]["assets"]}
+        for role in ("modality", "ultrasound", "mri", "xray"):
+            if "DICOM" not in observed.get(role, {}).get("protocols", []):
+                raise AssertionError(f"{role} has no packet-derived DICOM evidence")
+        for role in ("pump", "monitor", "lab_analyzer", "ventilator", "dialysis", "ecg"):
+            if "HL7/MLLP" not in observed.get(role, {}).get("protocols", []):
+                raise AssertionError(f"{role} has no packet-derived HL7 evidence")
+        if state["endpoints"]["pacs"]["counters"]["dicom_store"] < 4 or state["endpoints"]["ehr"]["counters"]["hl7_received"] < 6 or state["endpoints"]["pump"]["counters"]["maintenance_received"] < 1:
+            raise AssertionError("Four imaging studies, six telemetry feeds, and vendor status must reach their services")
         record("Normal clinical traffic succeeds and is parsed", baseline)
+
+        action("unknown")
+        wait_for(lambda s: any(a["ip"] == address("unregistered", "gns3") and not a["registered"]
+                               for a in s["monitor"]["assets"]), "unregistered endpoint discovery")
+        record("Unknown endpoint discovered from traffic, without authorized role assignment")
 
         action("recon")
         wait_for(lambda s: s["policy"]["workstation"] == "quarantined", "gateway quarantine")
@@ -86,7 +103,7 @@ def verify(backend, controller, output):
         action("anomaly")
         wait_for(lambda s: s["policy"]["pump"] == "restricted", "pump restriction")
         restricted = action("verify")["result"]
-        require_paths(restricted, False, True)
+        require_paths(restricted, False, True, vendor=False)
         blocked = action("anomaly")["result"]
         if any(r["success"] for r in blocked):
             raise AssertionError("Restricted pump must not connect to PACS")
@@ -97,13 +114,14 @@ def verify(backend, controller, output):
 
         action("approve", reviewer="Automated lab verification")
         isolated = action("verify")["result"]
-        require_paths(isolated, False, False)
-        record("Explicit lab approval isolates pump; imaging still succeeds", isolated)
+        require_paths(isolated, False, False, vendor=False)
+        record("Explicit lab approval isolates pump; other clinical paths still succeed", isolated)
 
         action("reset")
         restored = action("verify")["result"]
         require_paths(restored, True, True)
-        record("Reset restores all three clinical paths", restored)
+        record("Reset restores all twelve clinical and maintenance paths", restored)
+        action("pause")
         report["passed"] = True
     except Exception as error:
         report["error"] = str(error)

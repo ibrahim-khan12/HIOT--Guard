@@ -9,9 +9,44 @@ import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pydicom.dataset import Dataset, FileMetaDataset
+from pydicom.uid import ExplicitVRLittleEndian, generate_uid
 from pynetdicom import AE, evt
-from pynetdicom.sop_class import Verification
-from config import ROLES, SERVICE_PORTS, address
+from pynetdicom.sop_class import (CTImageStorage, DigitalXRayImageStorageForPresentation,
+                                  MRImageStorage, UltrasoundImageStorage, Verification)
+from config import NORMAL_ROLES, ROLES, SERVICE_PORTS, address
+
+
+def synthetic_image(role):
+    imaging = {"modality": (CTImageStorage, "CT"), "ultrasound": (UltrasoundImageStorage, "US"),
+               "mri": (MRImageStorage, "MR"), "xray": (DigitalXRayImageStorageForPresentation, "DX")}
+    sop_class, modality = imaging[role]
+    dataset = Dataset()
+    dataset.file_meta = FileMetaDataset()
+    dataset.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    dataset.SOPClassUID = sop_class
+    dataset.SOPInstanceUID = generate_uid()
+    dataset.StudyInstanceUID = generate_uid()
+    dataset.SeriesInstanceUID = generate_uid()
+    dataset.PatientName = "SYNTHETIC^LAB"
+    dataset.PatientID = "LAB_ONLY"
+    dataset.Modality = modality
+    dataset.ImageType = ["ORIGINAL", "PRIMARY", "AXIAL"] if role in ("modality", "mri") else ["ORIGINAL", "PRIMARY"]
+    dataset.StudyDate = time.strftime("%Y%m%d")
+    dataset.StudyTime = time.strftime("%H%M%S")
+    dataset.Rows = dataset.Columns = 16
+    dataset.SamplesPerPixel = 1
+    dataset.PhotometricInterpretation = "MONOCHROME2"
+    dataset.BitsAllocated = dataset.BitsStored = 8
+    dataset.HighBit = 7
+    dataset.PixelRepresentation = 0
+    dataset.PixelData = bytes(range(256))
+    if role == "modality":
+        dataset.PatientPosition = "HFS"
+        dataset.KVP = "100"
+        dataset.RescaleIntercept = "0"
+        dataset.RescaleSlope = "1"
+    return dataset
 
 
 class Agent:
@@ -27,7 +62,9 @@ class Agent:
         self.command_thread = None
         self.probe_generation = 0
         self.policy = {"workstation": "normal", "pump": "normal"}
-        self.counters = {"dicom_echo": 0, "hl7_received": 0, "http_received": 0, "denied": 0}
+        self.counters = {"dicom_echo": 0, "dicom_store": 0, "hl7_received": 0,
+                         "http_received": 0, "maintenance_received": 0, "denied": 0}
+        self.receipts = []
         self.results = []
         self.servers = []
         self.firewall = "not configured"
@@ -36,9 +73,17 @@ class Agent:
         with self.lock:
             self.counters[key] += 1
 
+    def receipt(self, peer, protocol, detail):
+        with self.lock:
+            self.receipts.insert(0, {"time": time.time(), "peer": peer,
+                                     "protocol": protocol, "detail": detail})
+            del self.receipts[40:]
+
     def permitted(self, peer, protocol):
         if self.mode != "local":
             return True
+        if self.role == "pump" and self.policy["pump"] != "normal" and protocol == "maintenance":
+            return False
         if peer == address("workstation", self.mode) and self.policy["workstation"] == "quarantined":
             return False
         if peer == address("pump", self.mode):
@@ -114,7 +159,8 @@ class Agent:
             self.firewall = subprocess.check_output(["iptables", "-nvL", "IOMT_LAB"], text=True)
         with self.lock:
             return {"role": self.role, "ip": self.ip, "running": self.running, "policy": dict(self.policy),
-                    "counters": dict(self.counters), "results": list(self.results), "firewall": self.firewall,
+                    "counters": dict(self.counters), "receipts": list(self.receipts),
+                    "results": list(self.results), "firewall": self.firewall,
                     "command": dict(self.command) if self.command else None}
 
     def start_services(self):
@@ -122,6 +168,10 @@ class Agent:
         if self.role == "pacs":
             ae = AE(ae_title="LAB_PACS")
             ae.add_supported_context(Verification)
+            ae.add_supported_context(CTImageStorage)
+            ae.add_supported_context(UltrasoundImageStorage)
+            ae.add_supported_context(MRImageStorage)
+            ae.add_supported_context(DigitalXRayImageStorageForPresentation)
 
             def accepted(event):
                 peer = event.assoc.requestor.address
@@ -133,10 +183,21 @@ class Agent:
                 if not agent.permitted(event.assoc.requestor.address, "dicom"):
                     return 0xC000
                 agent.count("dicom_echo")
+                agent.receipt(event.assoc.requestor.address, "DICOM C-ECHO", "Verification accepted")
+                return 0x0000
+
+            def store(event):
+                if not agent.permitted(event.assoc.requestor.address, "dicom"):
+                    agent.count("denied")
+                    return 0xC000
+                agent.count("dicom_store")
+                agent.receipt(event.assoc.requestor.address, "DICOM C-STORE",
+                              f"Synthetic {event.dataset.get('Modality', 'unknown')} instance accepted")
                 return 0x0000
 
             self.servers.append(ae.start_server((self.ip, 11112), block=False,
-                                evt_handlers=[(evt.EVT_ACCEPTED, accepted), (evt.EVT_C_ECHO, echo)]))
+                                evt_handlers=[(evt.EVT_ACCEPTED, accepted), (evt.EVT_C_ECHO, echo),
+                                              (evt.EVT_C_STORE, store)]))
         if self.role == "ehr":
             class Telemetry(socketserver.BaseRequestHandler):
                 def handle(self):
@@ -151,8 +212,14 @@ class Agent:
                             return
                         data += chunk
                     if data.startswith(b"\x0bMSH|") and b"\x1c\x0d" in data:
+                        fields = data[1:].split(b"\r", 1)[0].decode("ascii", errors="replace").split("|")
+                        sender = fields[2][:40] if len(fields) > 2 else "unknown"
+                        message_type = fields[8][:40] if len(fields) > 8 else "unknown"
+                        control_id = fields[9][:40] if len(fields) > 9 else "LAB"
                         agent.count("hl7_received")
-                        self.request.sendall(b"\x0bMSH|^~\\&|LAB_EHR|LAB|||20260928000000||ACK|ACK|P|2.5\rMSA|AA|LAB\r\x1c\r")
+                        agent.receipt(self.client_address[0], "HL7v2/MLLP", f"{sender} {message_type}")
+                        ack = f"MSH|^~\\&|LAB_EHR|LAB|||{time.strftime('%Y%m%d%H%M%S')}||ACK|{control_id}|P|2.5\rMSA|AA|{control_id}\r"
+                        self.request.sendall(b"\x0b" + ack.encode("ascii", errors="replace") + b"\x1c\r")
 
             class TCP(socketserver.ThreadingTCPServer):
                 allow_reuse_address = True
@@ -166,6 +233,8 @@ class Agent:
                 def do_GET(self):
                     allowed = agent.permitted(self.client_address[0], "http")
                     agent.count("http_received" if allowed else "denied")
+                    if allowed:
+                        agent.receipt(self.client_address[0], "HTTP", "EHR health request")
                     self.send_response(200 if allowed else 403)
                     self.end_headers()
                     self.wfile.write(b"LAB_EHR_OK" if allowed else b"DENIED")
@@ -174,6 +243,28 @@ class Agent:
                     pass
 
             server = ThreadingHTTPServer((self.ip, 8081), Health)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            self.servers.append(server)
+        if self.role == "pump":
+            class Maintenance(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    allowed = agent.permitted(self.client_address[0], "maintenance")
+                    if self.path != "/maintenance/status":
+                        self.send_error(404)
+                        return
+                    agent.count("maintenance_received" if allowed else "denied")
+                    if allowed:
+                        agent.receipt(self.client_address[0], "HTTP", "Read-only synthetic maintenance status")
+                    payload = b"SIMULATED_PUMP_READY" if allowed else b"DENIED"
+                    self.send_response(200 if allowed else 403)
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+
+                def log_message(self, *args):
+                    pass
+
+            server = ThreadingHTTPServer((self.ip, 8082), Maintenance)
             threading.Thread(target=server.serve_forever, daemon=True).start()
             self.servers.append(server)
 
@@ -189,38 +280,66 @@ class Agent:
             raise
 
     def normal_once(self):
-        operation = {"modality": "DICOM C-ECHO", "pump": "HL7 telemetry", "workstation": "Workstation EHR check"}.get(self.role, "Clinical path check")
+        operation = {"modality": "CT DICOM study", "ultrasound": "Ultrasound DICOM study",
+                     "mri": "MRI DICOM study", "xray": "X-ray DICOM study",
+                     "pump": "Pump synthetic HL7", "monitor": "Monitor synthetic HL7",
+                     "lab_analyzer": "Analyzer synthetic HL7", "ventilator": "Ventilator synthetic HL7",
+                     "dialysis": "Dialysis synthetic HL7", "ecg": "ECG synthetic HL7",
+                     "workstation": "Workstation EHR check",
+                     "vendor": "Read-only maintenance check", "unregistered": "Unregistered EHR request"}.get(self.role, "Clinical path check")
         try:
-            if self.role == "modality":
-                ae = AE(ae_title="LAB_MODALITY")
+            if self.role in ("modality", "ultrasound", "mri", "xray"):
+                contexts = {"modality": ("LAB_CT", CTImageStorage), "ultrasound": ("LAB_US", UltrasoundImageStorage),
+                            "mri": ("LAB_MR", MRImageStorage), "xray": ("LAB_DX", DigitalXRayImageStorageForPresentation)}
+                title, sop_class = contexts[self.role]
+                ae = AE(ae_title=title)
                 ae.add_requested_context(Verification)
+                ae.add_requested_context(sop_class)
                 ae.acse_timeout = ae.dimse_timeout = ae.network_timeout = 1
                 assoc = ae.associate(address("pacs", self.mode), 11112, ae_title="LAB_PACS", bind_address=(self.ip, 0))
-                ok = False
+                echo_ok = store_ok = False
                 if assoc.is_established:
                     response = assoc.send_c_echo()
-                    ok = response and response.Status == 0
+                    echo_ok = response and response.Status == 0
+                    response = assoc.send_c_store(synthetic_image(self.role))
+                    store_ok = response and response.Status == 0
                     assoc.release()
-                return self.record("DICOM C-ECHO", ok, "Verification response received" if ok else "No successful verification response")
-            if self.role == "pump":
+                return self.record(operation, echo_ok and store_ok,
+                                   f"Synthetic {self.role} C-ECHO={bool(echo_ok)} C-STORE={bool(store_ok)}")
+            if self.role in ("pump", "monitor", "lab_analyzer", "ventilator", "dialysis", "ecg"):
+                readings = {
+                    "pump": ("LAB_PUMP", "LAB_RATE", "25", "mL/h"),
+                    "monitor": ("LAB_MONITOR", "HEART_RATE", "72", "beats/min"),
+                    "lab_analyzer": ("LAB_ANALYZER", "GLUCOSE", "95", "mg/dL"),
+                    "ventilator": ("LAB_VENT", "RESPIRATORY_RATE", "16", "breaths/min"),
+                    "dialysis": ("LAB_DIALYSIS", "BLOOD_FLOW", "300", "mL/min"),
+                    "ecg": ("LAB_ECG", "ECG_HEART_RATE", "76", "beats/min"),
+                }
+                sender, observation, value, units = readings[self.role]
+                control_id = f"LAB{time.time_ns()}"
                 with self.connect("ehr", 2575) as sock:
-                    message = (f"MSH|^~\\&|LAB_PUMP|SYNTHETIC|LAB_EHR|LAB|{time.strftime('%Y%m%d%H%M%S')}||ORU^R01|LAB|P|2.5\r"
-                               "PID|1||TEST_ONLY\rOBR|1|||LAB_TELEMETRY\rOBX|1|NM|LAB_RATE||25|mL/h\r")
+                    message = (f"MSH|^~\\&|{sender}|SYNTHETIC|LAB_EHR|LAB|{time.strftime('%Y%m%d%H%M%S')}||ORU^R01|{control_id}|P|2.5\r"
+                               f"PID|1||LAB_ONLY\rOBR|1|||SYNTHETIC_{observation}\rOBX|1|NM|{observation}||{value}|{units}\r")
                     sock.sendall(b"\x0b" + message.encode("ascii") + b"\x1c\r")
                     response = sock.recv(4096)
-                    return self.record("HL7 telemetry", b"MSA|AA" in response, "ACK received" if b"MSA|AA" in response else "No ACK")
-            if self.role == "workstation":
-                with self.connect("ehr", 8081) as sock:
-                    sock.sendall(b"GET /health HTTP/1.0\r\nHost: lab\r\n\r\n")
+                    accepted = f"MSA|AA|{control_id}".encode() in response
+                    return self.record(operation, accepted, f"{sender} {observation}: " + ("ACK received" if accepted else "No matching ACK"))
+            if self.role in ("workstation", "vendor", "unregistered"):
+                target = "pump" if self.role == "vendor" else "ehr"
+                port = 8082 if self.role == "vendor" else 8081
+                path = "/maintenance/status" if self.role == "vendor" else "/health"
+                with self.connect(target, port) as sock:
+                    sock.sendall(f"GET {path} HTTP/1.0\r\nHost: lab\r\n\r\n".encode())
                     response = sock.recv(4096)
-                    return self.record("Workstation EHR check", b" 200 " in response, response.split(b"\r\n")[0].decode(errors="replace"))
+                    return self.record(operation, b" 200 " in response,
+                                       response.split(b"\r\n")[0].decode(errors="replace"))
         except Exception as error:
             return self.record(operation, False, error)
 
     def traffic_loop(self, stop):
         while not stop.is_set():
             self.normal_once()
-            stop.wait(2)
+            stop.wait(8 if self.role == "vendor" else 3)
 
     def begin_command(self, operation, token):
         if operation not in ("start", "stop", "probe", "recon", "anomaly") or not isinstance(token, str) or not 1 <= len(token) <= 100:
@@ -325,7 +444,7 @@ def main():
 
         def do_GET(self):
             if self.path == "/":
-                actions = ["start", "stop", "probe"] if agent.role in ("workstation", "pump", "modality") else []
+                actions = ["start", "stop", "probe"] if agent.role in NORMAL_ROLES else ["probe"] if agent.role == "unregistered" else []
                 if agent.role == "workstation":
                     actions.append("recon")
                 if agent.role == "pump":

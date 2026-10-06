@@ -10,12 +10,18 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from config import ROLES
+from config import CAPTURE_ROLES, NORMAL_ROLES, ROLES
 
-IMAGE = "iomt-live:1"
-NODE_POSITIONS = {"workstation": (-480, -160), "pump": (-480, 120), "modality": (-480, 280),
-                  "pacs": (420, -160), "ehr": (420, 80), "gateway": (0, 0)}
-SWITCH_POSITIONS = {"staff": (-230, -160), "medical": (-230, 180), "services": (220, 0)}
+IMAGE = "iomt-hospital:2"
+MANIFEST_FILE = "gns3-hospital-v2-manifest.json"
+NODE_POSITIONS = {
+    "workstation": (-570, -300), "vendor": (-570, -190), "unregistered": (-570, -80),
+    "pump": (-570, 30), "modality": (-570, 140), "ultrasound": (-570, 250),
+    "monitor": (-570, 360), "lab_analyzer": (-570, 470), "mri": (-570, 580),
+    "xray": (-570, 690), "ventilator": (-570, 800), "dialysis": (-570, 910),
+    "ecg": (-570, 1020), "pacs": (470, 190), "ehr": (470, 420), "gateway": (0, 260),
+}
+SWITCH_POSITIONS = {"staff": (-260, -190), "medical": (-260, 530), "services": (240, 300)}
 
 
 class PCAPStream:
@@ -106,7 +112,7 @@ class GNS3:
         if not candidates:
             raise ValueError("Connect a GNS3 VM/Linux compute with Docker support first; Windows local compute cannot run this topology.")
         compute = candidates[0]
-        manifest_path = self.folder / "gns3-manifest.json"
+        manifest_path = self.folder / MANIFEST_FILE
         saved = None
         if manifest_path.exists():
             saved = json.loads(manifest_path.read_text())
@@ -118,7 +124,7 @@ class GNS3:
             else:
                 raise ValueError("A lab already exists for a different server. Keep its manifest; use a separate project folder for another server.")
         if not saved:
-            project = self.api("/projects", {"name": "IoMT Live Defense " + time.strftime("%Y%m%d-%H%M%S"), "auto_close": False})
+            project = self.api("/projects", {"name": "HIoT Mini Hospital Expanded " + time.strftime("%Y%m%d-%H%M%S"), "auto_close": False})
             self.manifest = {"server": self.url, "project_id": project["project_id"], "project_name": project["name"],
                              "nodes": {}, "links": {}, "switches": {}, "gateway_links": {}, "complete": False}
         pid = self.manifest["project_id"]
@@ -142,7 +148,7 @@ class GNS3:
                 if zone not in switches:
                     node = self.api(f"/projects/{pid}/nodes", {"compute_id": compute["compute_id"], "name": zone + " switch",
                                     "node_type": "ethernet_switch", "x": SWITCH_POSITIONS[zone][0], "y": SWITCH_POSITIONS[zone][1],
-                                    "properties": {"ports_mapping": [{"name": f"Ethernet{p}", "port_number": p, "type": "access", "vlan": 1} for p in range(8)]}})
+                                    "properties": {"ports_mapping": [{"name": f"Ethernet{p}", "port_number": p, "type": "access", "vlan": 1} for p in range(16)]}})
                     switches[zone] = node["node_id"]
                     self.save()
                 gateway = self.manifest["nodes"]["gateway"]
@@ -167,7 +173,7 @@ class GNS3:
 
     def save(self):
         self.folder.mkdir(parents=True, exist_ok=True)
-        (self.folder / "gns3-manifest.json").write_text(json.dumps(self.manifest, indent=2))
+        (self.folder / MANIFEST_FILE).write_text(json.dumps(self.manifest, indent=2))
 
     def link(self, pid, first, adapter, switch, port):
         return self.api(f"/projects/{pid}/links", {"nodes": [
@@ -179,7 +185,7 @@ class GNS3:
             raise ValueError("The saved topology is incomplete. Finish its image/setup in GNS3; do not present it as a working lab.")
         pid = self.manifest["project_id"]
         existing = {n["node_id"]: n for n in self.api(f"/projects/{pid}/nodes")}
-        for role in ("gateway", "pacs", "ehr", "workstation", "pump", "modality"):
+        for role in ("gateway", "pacs", "ehr", *NORMAL_ROLES, "unregistered"):
             node_id = self.manifest['nodes'][role]
             if existing.get(node_id, {}).get("status") != "started":
                 self.api(f"/projects/{pid}/nodes/{node_id}/start", {})
@@ -229,7 +235,7 @@ class GNS3:
             raise
 
     def stop_captures(self):
-        for role in ("workstation", "pump", "modality"):
+        for role in CAPTURE_ROLES:
             try:
                 self.api(f"/projects/{self.manifest['project_id']}/links/{self.manifest['links'][role]}/stop_capture", {})
             except Exception:
