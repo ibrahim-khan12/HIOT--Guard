@@ -1,0 +1,7 @@
+{
+  "zeek_image": "zeek/zeek:8.0.10",
+  "zeek_digest": "zeek/zeek@sha256:73e80e9cd23ff71fd28d158e9a9af5c7b2b0ef5d4036af61521827531347c0e3",
+  "zeek_version": "8.0.10",
+  "tshark_package": "4.4.19-0+deb13u1",
+  "tshark_version": "4.4.19"
+}
