@@ -44,18 +44,15 @@ Starting a GNS3 session without importing or registering this archive remains su
 ## Run Now: Native Live Capture
 
 1. Open `D:\FYP\iomt-live\run-live-iomt.cmd`. It prepares an isolated Python environment and opens `http://127.0.0.1:8877/`.
-2. Select **Native packet-capture lab** and **Start session**. At this point the observed inventory is empty.
-3. Select **Start normal traffic**. Separate processes send CT, ultrasound, MRI, and X-ray synthetic DICOM C-ECHO/C-STORE; pump, bedside-monitor, lab-analyzer, ventilator, dialysis, and ECG synthetic HL7/MLLP telemetry; workstation EHR HTTP; and read-only vendor-to-pump HTTP. Assets and protocol evidence appear only when packets are captured.
-4. Select an asset to inspect the actual AE titles, Verification SOP Class, HL7 MSH sender/message type, or TCP indicators.
-5. Open **Response & Verification** and select **Verify clinical paths**. All twelve normal-source checks should succeed; PACS/EHR/pump receipt counters should increase.
-6. Select **Unknown endpoint request**. Its traffic is captured, but its IP has no authorized registry entry. It should remain unregistered, not automatically classified as a medical device.
-7. Select **Workstation probes**. Eight harmless TCP connect attempts target only the two configured lab service IPs. The monitor observes them; correlated indicators generate risk 85 and request quarantine.
-8. Select **Verify clinical paths** again. The workstation request should fail, while medical traffic and vendor maintenance still succeed.
-9. Select **Pump anomaly**. Unexpected pump-to-imaging connections trigger a safety restriction, not isolation. Pump HL7 telemetry should still succeed; vendor maintenance to the pump should fail.
-10. Enter a lab reviewer name and approve pump isolation. A fresh verification should now fail for pump telemetry too. The other imaging and telemetry paths remain available.
-11. Export the report. Use **Reset policy** to restore access without erasing packet history. Use **Stop session** when finished.
+2. Expand **Lab session**, select **Native capture lab**, and select **Connect lab**. The page lists ten configured medical emulators; observed counts and protocol evidence remain empty until packets arrive. For the prepared VM, choose **GNS3 routed lab** instead and supply its current private controller address.
+3. Select **Start traffic**. Separate processes send CT, ultrasound, MRI, and X-ray synthetic DICOM C-ECHO/C-STORE; pump, bedside-monitor, lab-analyzer, ventilator, dialysis, and ECG synthetic HL7/MLLP telemetry; workstation EHR HTTP; and read-only vendor-to-pump HTTP.
+4. Filter the medical devices by DICOM or HL7/MLLP, or search a name/address. Select a device name to inspect captured AE titles, Verification SOP Class, or HL7 MSH sender/message type. Configured destinations are displayed separately from captured protocols.
+5. Select **Check clinical paths**. All twelve normal-source checks should succeed. Inspect the per-source results, PACS/EHR/pump service receipts, and recent packets on the same page. Service totals can persist across sessions; they are not per-session throughput measurements.
+6. Select **Download session JSON** to export the backend's full session evidence. Use **Pause traffic** when idle and **End session** to close capture and save the session report and PCAPs.
 
-Native enforcement is a peer-IP service ACL at disposable PACS/EHR/pump services. It is NOT routed network isolation, an OS firewall, or GNS3. The browser labels it accordingly. This mode verifies the traffic/capture/parser/detection/response loop while the GNS3 runtime is prepared.
+The browser is the **Module 1 traffic-generation view**. Attack, risk, quarantine, and reviewer-approval controls are omitted from this interface. Existing detection/response code and the automated `verify_gns3.py` evaluation remain available for development. If restrictions were applied externally, the page displays a **Restore baseline paths** command. The earlier `DEMO_GUIDE.md` describes the broader prototype workflow and its old control names.
+
+Native enforcement is a peer-IP service ACL at disposable PACS/EHR/pump services. It is NOT routed network isolation, an OS firewall, or GNS3. The Module 1 page identifies the selected runtime and packet source.
 
 Capture is restricted to `127.77.0.0/16`; other Wi-Fi or user traffic is not monitored. Files go into `runs/<session>/`; stopping a session also saves its measured state and receipts to `report.json`. A session stops capturing at approximately 32 MB. Restart the session after that limit. Pause traffic or stop the session when not demonstrating it.
 
