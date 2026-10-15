@@ -156,3 +156,9 @@ To evaluate the expanded routed lab against the running local console after rebu
 ```
 
 Use the VM's current address. This command creates/reuses only the current managed project, checks thirteen packet streams, all twelve legitimate paths, unknown-endpoint discovery, service receipts, gateway DROP counters, and policy preservation, then saves measured phases. It refuses to take over a different active capture session. **Do not present earlier project reports as evidence for the current topology.** Zeek, trained ML classification, physical IoMT hardware, and hospital deployment are outside this first testbed module.
+
+## Module 2 Passive Monitoring
+
+The `module-2` branch adds an independent Zeek/TShark monitoring pipeline, SQLite connection history, medical-protocol evidence, cross-link TCP correlation, JSONL export and a console on `http://127.0.0.1:8878/`. Module 1 continues to generate traffic on port 8877. Module 2's live mode uses periodic PCAP snapshot analysis, with a visible processing interval and capture health.
+
+Install `requirements-module2.txt`, prepare the pinned Linux sensor, and run `run-module2.cmd`. See [MODULE2.md](MODULE2.md) for setup, the versioned data contract, API, capture retention, test commands and limitations. Actual run results are documented in [MODULE2_EVALUATION.md](MODULE2_EVALUATION.md).
