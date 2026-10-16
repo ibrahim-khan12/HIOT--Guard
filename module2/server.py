@@ -15,15 +15,15 @@ def handler(store, live, port):
     class API(BaseHTTPRequestHandler):
         def send(self, code, data, content_type="application/json", attachment=None):
             raw = data if isinstance(data, bytes) else json.dumps(data).encode()
-            self.send_response(code)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(raw)))
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Content-Type-Options", "nosniff")
-            if attachment:
-                self.send_header("Content-Disposition", f'attachment; filename="{attachment}"')
-            self.end_headers()
             try:
+                self.send_response(code)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                if attachment:
+                    self.send_header("Content-Disposition", f'attachment; filename="{attachment}"')
+                self.end_headers()
                 self.wfile.write(raw)
             except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
                 pass
@@ -36,7 +36,7 @@ def handler(store, live, port):
                 return self.send(200, Path(__file__).with_name("index.html").read_bytes(), "text/html; charset=utf-8")
             if parsed.path == "/api/status":
                 return self.send(200, {"app": "hiot-module2", "pid": os.getpid(), "live": live.running, "scope": getattr(live, "scope", None),
-                                       "snapshot_interval": live.interval, "generated": time.time(), **store.status(scope)})
+                                       "collector": live.status(), "snapshot_interval": live.interval, "generated": time.time(), **store.status(scope)})
             if parsed.path == "/api/summary":
                 return self.send(200, store.summary(scope))
             if parsed.path in ("/api/flows", "/api/export.jsonl"):

@@ -1,11 +1,13 @@
 """Offline and live-snapshot imports share the same verified processing path."""
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import time
 
 from . import SCHEMA_VERSION
 from .parsing import identity, normalize
 from .pcap import complete_pcap
+from .retention import raw_size
 
 
 class Pipeline:
@@ -27,16 +29,24 @@ class Pipeline:
                 return {**prior, "cached": True}
             folder = self.state / "artifacts" / capture_id
             folder.mkdir(parents=True, exist_ok=True)
-            copied = folder / "input.pcap"
-            owned = [p for root in (self.state/"live", self.state/"artifacts") if root.exists() for p in root.rglob("*.pcap")]
-            disk_bytes = sum(p.stat().st_size for p in owned)
+            revision = folder / facts["sha256"]
+            copied = revision / "input.pcap"
+            disk_bytes = raw_size(self.state)
             replaced = copied.stat().st_size if copied.exists() else 0
             if disk_bytes-replaced+len(data) > 256*1024*1024:
                 raise BufferError("Raw PCAP budget exceeded; existing evidence was preserved")
-            copied.write_bytes(data)
             self.store.health(source, state="analyzing", capture_id=capture_id, analysis_started=started)
-            tools = self.sensor.analyze(copied, folder)
-            flows, issues, reference = normalize(folder, capture_id, source, scope)
+            # Keep the last committed bytes intact until the new analysis succeeds.
+            with TemporaryDirectory(prefix="analysis-", dir=folder) as temporary:
+                staging = Path(temporary)
+                staged_capture = staging / "input.pcap"
+                staged_capture.write_bytes(data)
+                tools = self.sensor.analyze(staged_capture, staging)
+                flows, issues, reference = normalize(staging, capture_id, source, scope)
+                (staging / "packets.tsv").unlink(missing_ok=True)
+                revision.mkdir(exist_ok=True)
+                for artifact in staging.iterdir():
+                    artifact.replace(revision / artifact.name)
             if boundary:
                 issues.append({"kind": "rotation_boundary", "detail": "Connections may start midstream; missing SYNs are not cross-link correlated"})
             if not flows and facts["frames"]:
@@ -46,10 +56,12 @@ class Pipeline:
                       "raw_retained": True, "processed_at": time.time(), **facts, **tools, "reference": reference,
                       "duration_seconds": round(time.time()-started, 4), "issue_count": len(issues)}
             self.store.ingest(record, flows, issues)
-            (folder / "capture.json").write_text(json.dumps(record, indent=2))
-            (folder / "reference.json").write_text(json.dumps(reference, indent=2))
-            # Payloads stay in the explicitly retained raw PCAP, never the analytical store or packet TSV.
-            (folder / "packets.tsv").unlink(missing_ok=True)
+            (revision / "capture.json").write_text(json.dumps(record, indent=2))
+            (revision / "reference.json").write_text(json.dumps(reference, indent=2))
+            if prior and prior["raw_capture"] != str(copied.resolve()):
+                old_raw = Path(prior["raw_capture"]).resolve()
+                if old_raw.is_relative_to(folder.resolve()) and old_raw.name == "input.pcap":
+                    old_raw.unlink(missing_ok=True)
             self.store.health(source, state="analyzed", capture_id=capture_id, analyzed_at=time.time(), analysis_error=None,
                               error=None, analysis_seconds=record["duration_seconds"],
                               capture_loss="unavailable; no zero-loss claim", snapshot_bytes=facts["bytes"])

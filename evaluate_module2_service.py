@@ -8,6 +8,7 @@ import time
 import urllib.request
 
 from module2.sensor import Sensor
+from config import NORMAL_ROLES
 
 
 def status():
@@ -45,17 +46,22 @@ def main():
                     pass
             scope_captures = [c for c in state["captures"] if c["scope"] == report["scope"]]
             sample = {"at": time.time(), "service": json.loads(process.stdout), "containers": docker,
+                      "collector": state.get("collector"),
                       "canonical_flows_all_scopes": state["canonical_flows"],
                       "latest_analysis": max((c["processed_at"] for c in scope_captures), default=0),
                       "live_sources_analyzed": len({c["observation_source"] for c in scope_captures}),
                       "unexpected_errors": [h for h in state["health"] if (h.get("analysis_error") or h.get("error")) and not h.get("expected_failure")]}
+            sample["source_analysis_age_seconds"] = {h["source"]: round(sample["at"]-h["analyzed_at"], 3)
+                                                     for h in state["health"] if h["source"] in NORMAL_ROLES and h.get("analyzed_at")}
             report["samples"].append(sample)
             output.write_text(json.dumps(report, indent=2))
             print(f"sample {len(report['samples'])}: {sample['live_sources_analyzed']} sources; containers sampled {len(docker)}", flush=True)
             time.sleep(5)
         report.update(finished=time.time(), passed=initial["live"] and status()["live"] and
                       max(s["latest_analysis"] for s in report["samples"]) > report["samples"][0]["latest_analysis"] and
-                      not any(s["unexpected_errors"] for s in report["samples"]))
+                      not any(s["unexpected_errors"] for s in report["samples"]) and
+                      all(s["collector"] and s["collector"]["state"] == "running" for s in report["samples"]) and
+                      report["samples"][-1]["live_sources_analyzed"] >= len(NORMAL_ROLES))
         output.write_text(json.dumps(report, indent=2))
         print(str(output.resolve()), flush=True)
         if not report["passed"]:
