@@ -52,13 +52,19 @@ For live operation, start Module 1's prepared GNS3 session and normal traffic. I
 | Integrity finding | Capture ID, kind, and a frame/line/detail when available; malformed rows, packet truncation, TCP gaps/overlaps, incomplete framing, reassembly limits or rotation boundaries |
 | Health record | Capture/analysis state, latest received bytes/time, latest analysis, reconnect count, failure text and whether capture loss can be measured |
 
+HL7 evidence additionally records the frame containing the message start, its TCP-payload offset, and all supporting frames. These refer to captured bytes, including multiple messages on one persistent TCP connection. Medical TCP evidence is never attached to a UDP flow sharing the same addresses and port numbers.
+
 Device names, registry roles and clinical criticality are not inferred or included as observed facts. HL7 PID/OBX values are excluded from analytical records. Raw PCAPs retain original packet contents and require separate access/retention handling. Two-pass TShark DICOM decoding and the HL7 reassembler provide protocol evidence, not authenticated device identity.
 
 The 60-second summary groups connections by start time in the last 60 captured seconds. Its byte totals are totals of those selected connection records, not exact per-window packet-rate measurements. Offline summaries are anchored to capture time, not today's clock.
 
+SQLite indexes support capture/scope and canonical-ID queries. Canonical views are cached for at most two scopes and invalidated by a transactionally updated database revision, including imports made by another process. Returned flow records are independent copies. Cache entries still materialize their scope's history; this does not provide a fixed memory budget or replace archival/pagination for large deployments.
+
 ### Correlation and idempotence
 
 Offline capture identity uses scope, source and raw hash. Live segment identity uses recording scope, source and segment number. Observation IDs exclude Zeek's random UID. Identical imports are cached; `--force` reprocesses them with stable IDs.
+
+Reanalysis uses a fresh staging directory. A successful snapshot is published under its content hash before the database switches to it; failed analysis leaves the previous committed raw bytes intact. Successful replacement removes the previous raw copy, and database observations removed by reprocessing are replaced transactionally rather than left behind.
 
 Overlapping TCP observations correlate only when scope, oriented five-tuple and initial SYN sequence match, with start times within one second. SYN matching to a Zeek record uses a 250 ms window. A canonical record favors complete, zero-missed-byte observations and larger observed packet counts, with a deterministic source tie-breaker. Counters are taken from that observation and are never summed across overlapping links. Evidence retains each capture's provenance.
 
@@ -76,13 +82,21 @@ Without an observed SYN, cross-link correlation is deliberately unavailable. ICM
 
 The service binds only to `127.0.0.1`. Control requests reject other origins, non-JSON bodies and oversized requests. The API exposes no arbitrary shell, file-import, traffic-generation, policy or firewall endpoint.
 
+The status response includes `collector`: running/stopped/degraded state, expected/active reader-worker counts, analysis-worker liveness and sources with errors. An enabled service with a dead worker or sensor error is not displayed as healthy. Health records retain the latest state; this is not yet an append-only history of every transition.
+
 ## Live behavior and retention
 
 Live mode performs **periodic cumulative-PCAP analysis**, not continuous stateful Zeek streaming. The default pause between complete analysis cycles is 20 seconds, plus the processing time of all dirty sources. Finalized or timed-out connection records and snapshot processing introduce delay; do not claim instantaneous detection from this module.
 
 Each source keeps two 4 MiB complete-record segments. A segment may be evicted only after successful analysis; analytical history and hashes remain and `raw_retained` changes to false. Reaching the unprocessed-segment budget creates a visible limited state. A 256 MiB raw PCAP budget applies across the service. Old completed live scopes can expire; offline evidence is preserved. SQLite/metadata retention is not yet a production archival system.
 
+Eviction checks the analyzed byte watermark, not just whether the segment was analyzed once: packets appended after its last snapshot must be processed first. Whole-scope expiration checks every spool segment against its successfully imported hash. Backpressured readers retry with bounded backoff while analysis catches up. Temporary analysis staging can require an additional capture-sized working copy; unprocessed evidence is not silently discarded to make room.
+
+Header-only segments contain no packet evidence and cannot permanently block quiet-link reconnection. Storage accounting tolerates another reader retiring a segment concurrently. A disconnected sensor SSH session aborts that analysis cycle; pending snapshots remain for a new connection rather than being retried through an already dead SSH client.
+
 Reconnect uses exponential backoff up to 30 seconds and a fresh PCAP segment, preserving raw boundaries instead of concatenating headers. GNS3 may replay earlier bytes; correlation prevents matching TCP observations from inflating canonical totals. Starting a new user recording creates a new scope; an unexpected service restart resumes a persisted enabled scope. SSH credentials/key access must still be available at restart.
+
+Stopping closes capture readers and waits up to 210 seconds for an in-progress analysis to finish. If it does not finish, the API reports an error and does not claim the collector stopped successfully. SSH file transfers and version checks have explicit timeouts.
 
 Messages or long connections spanning rotation boundaries may be incomplete and are flagged. Classic PCAP is supported; PCAPNG import is explicitly refused by the collector. Capture-drop statistics are unavailable on this GNS3 HTTP feed and are reported as unavailable, not zero. Only observed links are covered; silent endpoints and unmonitored paths have no visibility guarantee.
 
@@ -96,6 +110,10 @@ Messages or long connections spanning rotation boundaries may be incomplete and 
 `verify_module2.py` runs actual Linux Zeek/TShark analysis, checks the independent SYN reference, DICOM CT/PACS evidence, HL7 ORU/ACK evidence, forced-repeat idempotence, overlapping TCP observations, malformed input and provenance. Optional live checks wait for all 12 normal sources with no browser used, interrupt the collector's own pump reader, and check reconnection. It preserves JSON, JSONL and console output under `runs/module2/`. Unit tests use explicit fixtures and do not substitute for these actual-tool checks.
 
 The original Module 1 service receipts are cumulative and are not a per-flow ground truth. Protocol-byte references and fresh Module 1 service checks must be presented separately. See `MODULE2_EVALUATION.md` for the measured run and outstanding limits.
+
+`MODULE2_REVIEW.md` records the subsequent code review, fixes, independent packet-byte verification and academic scope assessment. After actual-tool acceptance, run `python review_module2.py --state <acceptance-state-directory>` to save regression transcripts, retained-capture hash checks, independent local TShark frame checks and a review report. The Windows reference TShark version is recorded separately from the pinned Linux sensor version.
+
+For real sensor recovery coverage, add `--sensor-recovery` to `verify_module2.py --live`. It closes only that runner's own SSH connection, requires a recorded failure, and verifies a new connection plus fresh analysis from every normal source. It never stops the VM, changes SSH settings or interrupts the main monitoring service's session.
 
 ## Primary references
 

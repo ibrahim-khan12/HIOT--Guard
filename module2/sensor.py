@@ -37,21 +37,35 @@ class Sensor:
             self.client.set_missing_host_key_policy(Remember())
         else:
             self.client.set_missing_host_key_policy(paramiko.RejectPolicy())
-        self.client.connect(host, username=user, password=os.environ.get("GNS3_SSH_PASSWORD"),
-                            timeout=15, banner_timeout=15, auth_timeout=15)
-        self.sftp = self.client.open_sftp()
-        self.root = self.sftp.normalize(".") + "/hiot-module2"
+        self.sftp = None
         try:
-            self.sftp.mkdir(self.root)
-        except OSError:
-            self.sftp.stat(self.root)
-        self.uid = self.run("id -u").strip()
-        self.gid = self.run("id -g").strip()
+            self.client.connect(host, username=user, password=os.environ.get("GNS3_SSH_PASSWORD"),
+                                timeout=15, banner_timeout=15, auth_timeout=15)
+            self.sftp = self.client.open_sftp()
+            self.sftp.get_channel().settimeout(180)
+            self.root = self.sftp.normalize(".") + "/hiot-module2"
+            try:
+                self.sftp.mkdir(self.root)
+            except OSError:
+                self.sftp.stat(self.root)
+            self.uid = self.run("id -u").strip()
+            self.gid = self.run("id -g").strip()
+        except Exception:
+            self.close()
+            raise
         self.versions = None
 
     def close(self):
-        self.sftp.close()
-        self.client.close()
+        for connection in (self.sftp, self.client):
+            if connection:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+
+    def connected(self):
+        transport = self.client.get_transport()
+        return bool(transport and transport.is_active() and transport.is_authenticated())
 
     def run(self, command, timeout=600):
         _, stdout, stderr = self.client.exec_command(command, timeout=timeout)
@@ -99,7 +113,7 @@ class Sensor:
                 " -v " + shlex.quote(job + ":/work") + " -w /work " + shlex.quote(image) + " sh -c " + shlex.quote(script))
 
     def inspect(self, image):
-        output = self.run(self.docker(image, self.root, "zeek --version && tshark --version"))
+        output = self.run(self.docker(image, self.root, "zeek --version && tshark --version"), timeout=30)
         return {"zeek": next((x for x in output.splitlines() if x.startswith("zeek version")), "unavailable"),
                 "tshark": next((x for x in output.splitlines() if x.startswith("TShark")), "unavailable")}
 

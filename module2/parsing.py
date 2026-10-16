@@ -55,15 +55,15 @@ def reassemble(segments, limit=1024 * 1024):
                       for seq, data, frame in segments), key=lambda x: (x[0], x[2]))
     if sum(len(data) for _, data, _ in ordered) > limit:
         return [], [{"kind": "reassembly_limit", "limit_bytes": limit}]
-    chunks, issues, buffer, start, first_frame = [], [], bytearray(), None, None
+    chunks, issues, buffer, spans, start, first_frame = [], [], bytearray(), [], None, None
     for seq, data, frame in ordered:
         if start is None:
             start, first_frame = seq, frame
         end = start + len(buffer)
         if seq > end:
-            chunks.append((bytes(buffer), first_frame))
+            chunks.append((bytes(buffer), first_frame, spans))
             issues.append({"kind": "tcp_gap", "frame": frame, "missing_bytes": seq - end})
-            buffer, start, first_frame = bytearray(), seq, frame
+            buffer, spans, start, first_frame = bytearray(), [], seq, frame
             end = seq
         overlap = max(0, end - seq)
         if overlap:
@@ -72,35 +72,43 @@ def reassemble(segments, limit=1024 * 1024):
                 issues.append({"kind": "conflicting_tcp_overlap", "frame": frame})
                 # A conflicting stream has no trustworthy medical-message interpretation.
                 return [], issues
-        buffer.extend(data[overlap:])
-    chunks.append((bytes(buffer), first_frame))
+        if overlap < len(data):
+            spans.append((len(buffer), len(buffer)+len(data)-overlap, frame, overlap))
+            buffer.extend(data[overlap:])
+    chunks.append((bytes(buffer), first_frame, spans))
     return chunks, issues
 
 
 def hl7_messages(chunks):
     messages, issues = [], []
-    for data, frame in chunks:
+    for chunk in chunks:
+        data, frame = chunk[:2]
+        spans = chunk[2] if len(chunk) > 2 else [(0, len(data), frame, 0)]
         offset = 0
         while True:
             begin = data.find(b"\x0b", offset)
             if begin < 0:
                 break
+            supporting = [s for s in spans if s[0] <= begin < s[1]]
+            message_frame = supporting[0][2] if supporting else frame
             end = data.find(b"\x1c\x0d", begin + 1)
             if end < 0:
-                issues.append({"kind": "incomplete_mllp_message", "frame": frame})
+                issues.append({"kind": "incomplete_mllp_message", "frame": message_frame})
                 break
             msh = data[begin+1:end].split(b"\r", 1)[0].split(b"|")
             if len(msh) < 12 or msh[0] != b"MSH":
-                issues.append({"kind": "malformed_hl7_msh", "frame": frame})
+                issues.append({"kind": "malformed_hl7_msh", "frame": message_frame})
             else:
                 try:
                     # Deliberately omit PID, OBX and clinical observation values.
-                    messages.append({"frame": frame, "protocol": "HL7/MLLP", "parser_status": "confirmed",
+                    messages.append({"frame": message_frame, "protocol": "HL7/MLLP", "parser_status": "confirmed",
                                      "metadata": {"sender": msh[2].decode("ascii")[:80],
                                                   "message_type": msh[8].decode("ascii")[:40]},
-                                     "message_offset": begin})
+                                     "message_offset": begin,
+                                     "frame_payload_offset": begin-supporting[0][0]+supporting[0][3] if supporting else None,
+                                     "supporting_frames": list(dict.fromkeys(s[2] for s in spans if s[0] < end+2 and s[1] > begin))})
                 except UnicodeDecodeError:
-                    issues.append({"kind": "non_ascii_hl7_metadata", "frame": frame})
+                    issues.append({"kind": "non_ascii_hl7_metadata", "frame": message_frame})
             offset = end + 2
     return messages, issues
 
@@ -144,7 +152,8 @@ def normalize(folder, capture_id, source_id, scope):
     def find_flow(row):
         key = endpoints(row)
         reverse = (key[2], key[3], key[0], key[1])
-        candidates = [f for f in flows if (f["source_ip"], f["source_port"], f["destination_ip"], f["destination_port"]) in (key, reverse)
+        candidates = [f for f in flows if f["transport"] == "tcp"
+                      and (f["source_ip"], f["source_port"], f["destination_ip"], f["destination_port"]) in (key, reverse)
                       and f["start_time"] - .25 <= row["timestamp"] <= f["start_time"] + (f["duration"] or 0) + 2]
         return min(candidates, key=lambda f: abs(f["start_time"] - row["timestamp"])) if candidates else None
 

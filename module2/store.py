@@ -1,5 +1,6 @@
 """Transactional observations with deterministic canonical-flow selection."""
 import json
+from copy import deepcopy
 from pathlib import Path
 import sqlite3
 import threading
@@ -15,6 +16,7 @@ class Store:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
+        self._cache, self._cache_revision = {}, -1
         with self.connect() as db:
             db.executescript('''
                 PRAGMA journal_mode=WAL;
@@ -22,6 +24,11 @@ class Store:
                 CREATE TABLE IF NOT EXISTS observations(id TEXT PRIMARY KEY, capture_id TEXT, canonical_id TEXT,
                     correlation_key TEXT, start_time REAL, data TEXT);
                 CREATE INDEX IF NOT EXISTS observation_correlation ON observations(correlation_key,start_time);
+                CREATE INDEX IF NOT EXISTS observation_capture_canonical ON observations(capture_id,canonical_id);
+                CREATE INDEX IF NOT EXISTS observation_canonical ON observations(canonical_id);
+                CREATE INDEX IF NOT EXISTS capture_scope ON captures(scope);
+                CREATE TABLE IF NOT EXISTS flow_revision(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL);
+                INSERT OR IGNORE INTO flow_revision VALUES(1,0);
                 CREATE TABLE IF NOT EXISTS issues(id TEXT PRIMARY KEY,capture_id TEXT,data TEXT);
                 CREATE TABLE IF NOT EXISTS health(source TEXT PRIMARY KEY,data TEXT);
                 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,data TEXT);
@@ -49,11 +56,15 @@ class Store:
                         canonical = found[0]
                 db.execute("INSERT OR REPLACE INTO observations VALUES(?,?,?,?,?,?)",
                            (flow["observation_id"], flow["capture_id"], canonical, flow["correlation_key"], flow["start_time"], json.dumps(flow)))
+            current = {flow["observation_id"] for flow in flows}
+            previous = db.execute("SELECT id FROM observations WHERE capture_id=?", (capture["capture_id"],)).fetchall()
+            db.executemany("DELETE FROM observations WHERE id=?", ((row[0],) for row in previous if row[0] not in current))
             # A growing snapshot may resolve a previous incomplete-message warning.
             db.execute("DELETE FROM issues WHERE capture_id=?", (capture["capture_id"],))
             for issue in issues:
                 db.execute("INSERT OR REPLACE INTO issues VALUES(?,?,?)",
                            (identity(capture["capture_id"], issue), capture["capture_id"], json.dumps(issue)))
+            db.execute("UPDATE flow_revision SET version=version+1 WHERE id=1")
 
     def health(self, source, **values):
         with self.lock, self.connect() as db:
@@ -69,9 +80,17 @@ class Store:
             row = db.execute("SELECT data FROM settings WHERE key=?", (key,)).fetchone()
             return json.loads(row[0]) if row else None
 
-    def flows(self, query="", protocol="", limit=1000, scope=None, transport=None):
+    def _canonical_records(self, scope):
         with self.connect() as db:
-            rows = db.execute("SELECT canonical_id,data FROM observations").fetchall()
+            db.execute("BEGIN")
+            revision = db.execute("SELECT version FROM flow_revision WHERE id=1").fetchone()[0]
+            with self.lock:
+                if revision == self._cache_revision and scope in self._cache:
+                    return self._cache[scope]
+            if scope is None:
+                rows = db.execute("SELECT canonical_id,data FROM observations").fetchall()
+            else:
+                rows = db.execute("SELECT canonical_id,data FROM observations WHERE capture_id IN (SELECT id FROM captures WHERE scope=?)", (scope,)).fetchall()
         groups = {}
         for key, raw in rows:
             observation = json.loads(raw)
@@ -94,6 +113,23 @@ class Store:
                 record["source_port"] = record["destination_port"] = None
             medical_port = record["transport"] == "tcp" and bool({record["source_port"], record["destination_port"]} & {2575, 11112})
             record["protocol_status"] = "confirmed" if record["evidence"] else "unconfirmed" if medical_port else "not_identified"
+            result.append(record)
+        result.sort(key=lambda r: (r["start_time"], r["flow_id"]), reverse=True)
+        with self.lock:
+            if revision >= self._cache_revision:
+                if revision != self._cache_revision:
+                    self._cache.clear()
+                    self._cache_revision = revision
+                self._cache[scope] = result
+                if len(self._cache) > 2:
+                    del self._cache[next(iter(self._cache))]
+        return result
+
+    def flows(self, query="", protocol="", limit=1000, scope=None, transport=None):
+        if limit <= 0:
+            return []
+        result = []
+        for record in self._canonical_records(scope):
             if transport and record["transport"] != transport:
                 continue
             if query and query.lower() not in json.dumps({k: record[k] for k in ("source_ip", "source_port", "destination_ip", "destination_port", "observation_sources")}).lower():
@@ -101,7 +137,9 @@ class Store:
             if protocol and not any(e["protocol"] == protocol for e in record["evidence"]):
                 continue
             result.append(record)
-        return sorted(result, key=lambda r: (r["start_time"], r["flow_id"]), reverse=True)[:limit]
+            if len(result) >= limit:
+                break
+        return deepcopy(result)
 
     def status(self, scope=None):
         with self.connect() as db:
@@ -130,7 +168,7 @@ class Store:
                 out.write(json.dumps(record, sort_keys=True) + "\n")
 
     def summary(self, scope=None, window=60):
-        records = self.flows(limit=2**31, scope=scope)
+        records = self._canonical_records(scope)
         end = max((r["start_time"] for r in records), default=0)
         endpoints = {}
         for r in records:

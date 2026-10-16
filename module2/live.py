@@ -22,19 +22,19 @@ class Spool:
         self.root.mkdir(parents=True, exist_ok=True)
         self.limit, self.lock = limit, threading.RLock()
         self.buffer, self.header, self.segments = bytearray(), None, []
-        self.processed, self.counter = set(), 0
+        self.processed, self.counter = {}, 0
         for path in sorted(self.root.glob("segment-*.pcap")):
             number = int(path.stem.split("-")[-1])
             self.counter = max(self.counter, number)
             self.segments.append({"id": identity(scope, source, number), "path": path,
                                   "boundary": number > 1, "bytes": path.stat().st_size})
-        known = {c["capture_id"] for c in store.status()["captures"]}
-        self.processed.update(s["id"] for s in self.segments if s["id"] in known)
+        known = {c["capture_id"]: c.get("bytes", 0) for c in store.status()["captures"]}
+        self.processed.update((s["id"], known[s["id"]]) for s in self.segments if s["id"] in known)
 
     def new_segment(self):
         if len(self.segments) >= 2:
             old = self.segments[0]
-            if old["id"] not in self.processed:
+            if old["bytes"] > 24 and self.processed.get(old["id"], 0) < old["bytes"]:
                 raise BufferError("Analysis cannot keep up with the two-segment raw retention budget")
             self.store.expire_raw(old["id"])
             old["path"].unlink(missing_ok=True)
@@ -69,9 +69,9 @@ class Spool:
                 if len(self.buffer) < 16+captured:
                     break
                 record = bytes(self.buffer[:16+captured])
-                del self.buffer[:16+captured]
                 if self.segments[-1]["bytes"] + len(record) > self.limit:
                     self.new_segment()
+                del self.buffer[:16+captured]
                 segment = self.segments[-1]
                 with segment["path"].open("ab") as target:
                     target.write(record)
@@ -86,6 +86,18 @@ class Live:
         self.threads, self.streams, self.spools = [], {}, {}
         self.lock = threading.RLock()
         self.running = False
+
+    def status(self):
+        readers = sum(thread.is_alive() for thread in self.threads[:-1])
+        analyzer = bool(self.threads and self.threads[-1].is_alive())
+        sources = set(self.spools)
+        failures = [h["source"] for h in self.store.status()["health"]
+                    if h["source"] in sources | {"sensor"} and not h.get("expected_failure")
+                    and (h.get("analysis_error") or h.get("error") or h.get("state") in ("limited", "error", "retrying"))]
+        degraded = self.stop_event.is_set() or not analyzer or readers != len(sources) or bool(failures)
+        return {"state": "stopped" if not self.running else "degraded" if degraded else "running",
+                "expected_readers": len(sources), "active_readers": readers, "analysis_thread_alive": analyzer,
+                "sources_with_errors": failures}
 
     def start(self):
         if self.running:
@@ -125,8 +137,10 @@ class Live:
                     self.spools[source].feed(data)
                     self.store.health(source, state="receiving", last_received=time.time(), error=None)
             except BufferError as error:
-                self.store.health(source, state="limited", error=str(error))
-                break
+                failures += 1
+                self.store.health(source, state="limited", error=str(error), reconnects=failures)
+                if self.stop_event.wait(min(30, 2**min(failures, 5))):
+                    break
             except Exception as error:
                 if self.stop_event.is_set():
                     break
@@ -158,20 +172,27 @@ class Live:
                         temporary = self.state / ("snapshot-" + source + ".pcap")
                         try:
                             with spool.lock:
+                                if spool.processed.get(segment["id"]) == segment["bytes"]:
+                                    continue
                                 info = snapshot(segment["path"], temporary)
                             if not info["frames"]:
+                                with spool.lock:
+                                    spool.processed[segment["id"]] = info["bytes"]
                                 continue
                             record = pipeline.import_file(temporary, source, self.scope, segment["id"], boundary=segment["boundary"])
                             with spool.lock:
-                                spool.processed.add(segment["id"])
+                                spool.processed[segment["id"]] = info["bytes"]
                             self.store.health(source, analyzed_frames=record["frames"], analyzed_sha256=record["sha256"],
                                               snapshot_tail_bytes=info["incomplete_tail_bytes"],
                                               processing_mode="periodic cumulative PCAP snapshot")
                         except Exception as error:
                             self.store.health(source, analysis_error=str(error), analysis_failed_at=time.time())
+                            if not sensor.connected():
+                                raise ConnectionError("Linux sensor SSH disconnected; pending captures are preserved for reconnection") from error
                         finally:
                             temporary.unlink(missing_ok=True)
                 enforce_budget(self.store, self.state, self.scope)
+                self.store.health("sensor", state="ready", error=None)
             except BufferError as error:
                 self.store.health("sensor", state="limited", error=str(error))
                 self.stop_event.set()
@@ -189,7 +210,7 @@ class Live:
                     sensor.close()
             self.stop_event.wait(self.interval)
 
-    def stop(self):
+    def stop(self, timeout=210):
         self.stop_event.set()
         with self.lock:
             streams = list(self.streams.values())
@@ -198,8 +219,9 @@ class Live:
                 stream.close()
             except OSError:
                 pass
+        deadline = time.monotonic()+timeout
         for thread in self.threads:
-            thread.join(timeout=5)
+            thread.join(timeout=max(0, deadline-time.monotonic()))
         if any(thread.is_alive() for thread in self.threads):
             raise RuntimeError("An analysis job is still finishing; restart remains disabled until it exits")
         self.running = False
