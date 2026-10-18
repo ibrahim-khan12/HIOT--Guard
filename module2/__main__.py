@@ -24,14 +24,18 @@ def main():
     export = sub.add_parser("export")
     export.add_argument("output")
     sub.add_parser("status")
+    archive = sub.add_parser("archive-history", help="Back up and prune closed live scopes, preserving raw files")
+    archive.add_argument("--before-unix", type=float, required=True)
     server = sub.add_parser("serve")
     server.add_argument("--manifest", default="runs/gns3-hospital-v2-manifest.json")
     server.add_argument("--port", default=8878, type=int)
-    server.add_argument("--interval", default=20, type=int)
+    server.add_argument("--interval", default=5, type=int)
+    server.add_argument("--workers", default=2, type=int, choices=(1, 2, 3, 4))
+    server.add_argument("--window", default=30, type=int)
     args = parser.parse_args()
     state = Path(args.state).resolve()
     store = Store(state / "monitoring.sqlite3")
-    factory = lambda: Sensor(args.sensor_host, state, args.sensor_user)
+    factory = lambda: Sensor(args.sensor_host, state, args.sensor_user, persistent=True)
     if args.command == "setup-sensor":
         sensor = Sensor(args.sensor_host, state, args.sensor_user, args.trust_first_use)
         try:
@@ -49,11 +53,13 @@ def main():
         print(str(Path(args.output).resolve()))
     elif args.command == "status":
         print(json.dumps(store.status(), indent=2))
+    elif args.command == "archive-history":
+        print(json.dumps(store.archive_history(args.before_unix), indent=2))
     elif args.command == "serve":
-        if not 5 <= args.interval <= 300:
+        if not 5 <= args.interval <= 300 or not 10 <= args.window <= 300:
             parser.error("interval must be 5..300 seconds")
         from .server import serve
-        serve(store, Live(store, state, factory, args.manifest, args.interval), args.port)
+        serve(store, Live(store, state, factory, args.manifest, args.interval, args.workers, args.window), args.port)
 
 
 if __name__ == "__main__":
