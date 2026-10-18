@@ -7,9 +7,11 @@ import ipaddress
 import json
 from pathlib import Path
 from collections import defaultdict
+from bisect import bisect_left, bisect_right
 
 from . import SCHEMA_VERSION
 from .sensor import FIELDS
+from .pcap import packet_fingerprints
 
 
 def identity(*parts):
@@ -55,15 +57,15 @@ def reassemble(segments, limit=1024 * 1024):
                       for seq, data, frame in segments), key=lambda x: (x[0], x[2]))
     if sum(len(data) for _, data, _ in ordered) > limit:
         return [], [{"kind": "reassembly_limit", "limit_bytes": limit}]
-    chunks, issues, buffer, start, first_frame = [], [], bytearray(), None, None
+    chunks, issues, buffer, spans, start, first_frame = [], [], bytearray(), [], None, None
     for seq, data, frame in ordered:
         if start is None:
             start, first_frame = seq, frame
         end = start + len(buffer)
         if seq > end:
-            chunks.append((bytes(buffer), first_frame))
+            chunks.append((bytes(buffer), first_frame, spans))
             issues.append({"kind": "tcp_gap", "frame": frame, "missing_bytes": seq - end})
-            buffer, start, first_frame = bytearray(), seq, frame
+            buffer, spans, start, first_frame = bytearray(), [], seq, frame
             end = seq
         overlap = max(0, end - seq)
         if overlap:
@@ -72,35 +74,43 @@ def reassemble(segments, limit=1024 * 1024):
                 issues.append({"kind": "conflicting_tcp_overlap", "frame": frame})
                 # A conflicting stream has no trustworthy medical-message interpretation.
                 return [], issues
-        buffer.extend(data[overlap:])
-    chunks.append((bytes(buffer), first_frame))
+        if overlap < len(data):
+            spans.append((len(buffer), len(buffer)+len(data)-overlap, frame, overlap))
+            buffer.extend(data[overlap:])
+    chunks.append((bytes(buffer), first_frame, spans))
     return chunks, issues
 
 
 def hl7_messages(chunks):
     messages, issues = [], []
-    for data, frame in chunks:
+    for chunk in chunks:
+        data, frame = chunk[:2]
+        spans = chunk[2] if len(chunk) > 2 else [(0, len(data), frame, 0)]
         offset = 0
         while True:
             begin = data.find(b"\x0b", offset)
             if begin < 0:
                 break
+            supporting = [s for s in spans if s[0] <= begin < s[1]]
+            message_frame = supporting[0][2] if supporting else frame
             end = data.find(b"\x1c\x0d", begin + 1)
             if end < 0:
-                issues.append({"kind": "incomplete_mllp_message", "frame": frame})
+                issues.append({"kind": "incomplete_mllp_message", "frame": message_frame})
                 break
             msh = data[begin+1:end].split(b"\r", 1)[0].split(b"|")
             if len(msh) < 12 or msh[0] != b"MSH":
-                issues.append({"kind": "malformed_hl7_msh", "frame": frame})
+                issues.append({"kind": "malformed_hl7_msh", "frame": message_frame})
             else:
                 try:
                     # Deliberately omit PID, OBX and clinical observation values.
-                    messages.append({"frame": frame, "protocol": "HL7/MLLP", "parser_status": "confirmed",
+                    messages.append({"frame": message_frame, "protocol": "HL7/MLLP", "parser_status": "confirmed",
                                      "metadata": {"sender": msh[2].decode("ascii")[:80],
                                                   "message_type": msh[8].decode("ascii")[:40]},
-                                     "message_offset": begin})
+                                     "message_offset": begin,
+                                     "frame_payload_offset": begin-supporting[0][0]+supporting[0][3] if supporting else None,
+                                     "supporting_frames": list(dict.fromkeys(s[2] for s in spans if s[0] < end+2 and s[1] > begin))})
                 except UnicodeDecodeError:
-                    issues.append({"kind": "non_ascii_hl7_metadata", "frame": frame})
+                    issues.append({"kind": "non_ascii_hl7_metadata", "frame": message_frame})
             offset = end + 2
     return messages, issues
 
@@ -141,11 +151,48 @@ def normalize(folder, capture_id, source_id, scope):
         except (ValueError, KeyError, TypeError):
             issues.append({"kind": "malformed_zeek_record", "line": number})
 
+    raw_path = folder / "input.pcap"
+    exact_packets = packet_fingerprints(raw_path) if raw_path.exists() else {}
+    packet_index, ip_index = defaultdict(list), defaultdict(list)
+    for row in rows:
+        packet_index[endpoints(row)].append(row)
+        ip_index[(row["source_ip"], row["destination_ip"])].append(row)
+    def timed_index(groups):
+        return {key: (sorted(values, key=lambda r:r["timestamp"]), sorted(r["timestamp"] for r in values))
+                for key, values in groups.items()}
+    packet_index, ip_index = timed_index(packet_index), timed_index(ip_index)
+    def observed_between(index, key, begin, end):
+        values, times = index.get(key, ([], []))
+        return values[bisect_left(times, begin):bisect_right(times, end)]
+    for flow in flows:
+        if flow["correlation_key"]:
+            continue
+        relevant = []
+        begin, end = flow["start_time"]-.000001, flow["start_time"]+(flow["duration"] or 0)+.000001
+        if flow["transport"] in ("tcp", "udp"):
+            index = packet_index
+            origin = (flow["source_ip"], flow["source_port"], flow["destination_ip"], flow["destination_port"])
+            reverse = (origin[2], origin[3], origin[0], origin[1])
+        else:
+            index = ip_index
+            origin, reverse = (flow["source_ip"], flow["destination_ip"]), (flow["destination_ip"], flow["source_ip"])
+        for row in observed_between(index, origin, begin, end) + observed_between(index, reverse, begin, end):
+            if row["frame"] in exact_packets:
+                relevant.append(exact_packets[row["frame"]])
+        if relevant and len(relevant) == flow["origin_packets"] + flow["response_packets"]:
+            flow["correlation_key"] = identity(scope, "exact-recorded-packets", flow["transport"], sorted(relevant))
+            flow["correlation_status"] = "exact_packet_replay"
+
+    by_endpoints = defaultdict(list)
+    for flow in flows:
+        if flow["transport"] == "tcp":
+            by_endpoints[(flow["source_ip"], flow["source_port"], flow["destination_ip"], flow["destination_port"])].append(flow)
+
     def find_flow(row):
         key = endpoints(row)
         reverse = (key[2], key[3], key[0], key[1])
-        candidates = [f for f in flows if (f["source_ip"], f["source_port"], f["destination_ip"], f["destination_port"]) in (key, reverse)
-                      and f["start_time"] - .25 <= row["timestamp"] <= f["start_time"] + (f["duration"] or 0) + 2]
+        candidates = [f for f in by_endpoints[key] + by_endpoints[reverse]
+                      if f["start_time"] - .25 <= row["timestamp"] <= f["start_time"] + (f["duration"] or 0) + 2]
         return min(candidates, key=lambda f: abs(f["start_time"] - row["timestamp"])) if candidates else None
 
     def add(flow, row, item):
@@ -165,6 +212,7 @@ def normalize(folder, capture_id, source_id, scope):
                                              "abstract_syntax": row["dicom.pctx.abss.syntax"]}})
 
     for stream, packets in stream_rows.items():
+        frames = {r["frame"]: r for r in packets}
         directions = defaultdict(list)
         for row in packets:
             if not row["tcp.payload"]:
@@ -181,7 +229,7 @@ def normalize(folder, capture_id, source_id, scope):
             messages, message_issues = hl7_messages(chunks)
             issues.extend({**issue, "tcp_stream": stream} for issue in stream_issues + message_issues)
             for item in messages:
-                row = next(r for r in packets if r["frame"] == item["frame"])
+                row = frames[item["frame"]]
                 flow = find_flow(row)
                 if flow:
                     add(flow, row, item)
