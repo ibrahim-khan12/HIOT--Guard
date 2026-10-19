@@ -15,7 +15,7 @@ URL = "http://127.0.0.1:8878/"
 
 def ready():
     try:
-        with urllib.request.urlopen(URL+"api/status", timeout=2) as response:
+        with urllib.request.urlopen(URL+"api/ready", timeout=2) as response:
             return json.load(response).get("app") == "hiot-module2"
     except Exception:
         return False
@@ -25,6 +25,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--sensor-host", default="192.168.209.142")
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--state", default="runs/module2")
     args = parser.parse_args()
     if not ready():
         (ROOT / "runs").mkdir(exist_ok=True)
@@ -33,11 +34,12 @@ def main():
         if not environment.get("GNS3_SSH_PASSWORD"):
             environment["GNS3_SSH_PASSWORD"] = getpass.getpass("GNS3 VM SSH password (blank for configured SSH key): ")
         with (ROOT / "runs" / "module2-server.log").open("a") as log:
-            process = subprocess.Popen([str(python), "-m", "module2", "--sensor-host", args.sensor_host, "serve"],
+            process = subprocess.Popen([str(python), "-m", "module2", "--state", args.state, "--sensor-host", args.sensor_host, "serve"],
                                        cwd=ROOT, stdout=log, stderr=log, env=environment,
                                        creationflags=(subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS) if os.name == "nt" else 0,
                                        start_new_session=os.name != "nt")
-        for _ in range(50):
+        # Existing databases may need a one-time indexed-view migration.
+        for _ in range(900):
             if ready():
                 break
             if process.poll() is not None:

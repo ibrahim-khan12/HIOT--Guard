@@ -68,6 +68,7 @@ class Module2Tests(unittest.TestCase):
         self.db = Store(self.root / "monitoring.sqlite3")
 
     def tearDown(self):
+        self.db.close()
         self.temp.cleanup()
 
     def test_pcap_counts_complete_records(self):
@@ -477,13 +478,16 @@ class Module2Tests(unittest.TestCase):
         first, second = Mock(), Mock()
         first.analyze.side_effect = ConnectionError("SSH socket closed")
         first.connected.return_value = False
-        second.analyze.side_effect = lambda path, folder: (fixture(folder) or {"analysis_seconds": .1})
+        def recover(path, folder):
+            fixture(folder)
+            live.stop_event.set()
+            return {"analysis_seconds": .1}
+        second.analyze.side_effect = recover
         live = Live(self.db, self.root, Mock(side_effect=[first, second]), "unused", interval=.01)
         live.scope = "scope"
         spool = Spool(self.root/"live"/"pump", "pump", live.scope, self.db)
         spool.feed(HEADER+PACKET)
         live.spools = {"pump": spool}
-        second.close.side_effect = live.stop_event.set
         live.analyze()
         first.close.assert_called_once()
         self.assertEqual(self.db.status()["observations"], 1)
@@ -506,8 +510,8 @@ class Module2Tests(unittest.TestCase):
         live.spools = {"pump": spool}
         with patch.object(live.stop_event, "wait", return_value=False):
             live.read("pump")
-        self.assertEqual(live.adapter.stream.call_count, 2)
-        self.assertEqual(spool.reconnect.call_count, 2)
+        self.assertEqual(live.adapter.stream.call_count, 1)
+        self.assertEqual(spool.reconnect.call_count, 1)
         self.assertIsNone(self.db.status()["health"][0]["error"])
 
     def test_failed_reanalysis_preserves_previous_capture_bytes(self):

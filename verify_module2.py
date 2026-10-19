@@ -52,7 +52,7 @@ def run(args):
         after = store.flows(scope=scope, limit=100000)
         check("Overlapping TCP capture does not inflate canonical connection totals", len([r for r in after if r["transport"] == "tcp"]) == reference,
               correlated_tcp=sum(r["observation_count"] > 1 for r in after if r["transport"] == "tcp"),
-              note="Non-SYN ICMP observations deliberately remain separate")
+              note="Only SYN-supported matches or exact recorded-packet replays correlate; other observations stay separate")
         bad = state/"acceptance-truncated.pcap"
         bad.write_bytes((Path(args.captures)/"pump.pcap").read_bytes()[:-1])
         rejected = False
@@ -120,10 +120,10 @@ def run(args):
                 deadline, saw_failure, recovered = time.time()+300, False, False
                 while time.time() < deadline:
                     health = store.status(live.scope)["health"]
-                    sensor_health = next((h for h in health if h["source"] == "sensor"), {})
-                    saw_failure |= bool(sensor_health.get("error"))
+                    sensor_health = [h for h in health if h["source"].startswith("sensor")]
+                    saw_failure |= any(h.get("error") for h in sensor_health)
                     fresh = {h["source"] for h in health if h.get("analyzed_at", 0) > interrupted_at and not h.get("analysis_error")}
-                    recovered = saw_failure and len(sensors) > connections_before and set(NORMAL_ROLES).issubset(fresh) and not sensor_health.get("error")
+                    recovered = saw_failure and len(sensors) > connections_before and set(NORMAL_ROLES).issubset(fresh) and not any(h.get("error") for h in sensor_health)
                     if recovered:
                         break
                     time.sleep(1)

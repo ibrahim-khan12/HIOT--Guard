@@ -7,9 +7,11 @@ import ipaddress
 import json
 from pathlib import Path
 from collections import defaultdict
+from bisect import bisect_left, bisect_right
 
 from . import SCHEMA_VERSION
 from .sensor import FIELDS
+from .pcap import packet_fingerprints
 
 
 def identity(*parts):
@@ -149,12 +151,48 @@ def normalize(folder, capture_id, source_id, scope):
         except (ValueError, KeyError, TypeError):
             issues.append({"kind": "malformed_zeek_record", "line": number})
 
+    raw_path = folder / "input.pcap"
+    exact_packets = packet_fingerprints(raw_path) if raw_path.exists() else {}
+    packet_index, ip_index = defaultdict(list), defaultdict(list)
+    for row in rows:
+        packet_index[endpoints(row)].append(row)
+        ip_index[(row["source_ip"], row["destination_ip"])].append(row)
+    def timed_index(groups):
+        return {key: (sorted(values, key=lambda r:r["timestamp"]), sorted(r["timestamp"] for r in values))
+                for key, values in groups.items()}
+    packet_index, ip_index = timed_index(packet_index), timed_index(ip_index)
+    def observed_between(index, key, begin, end):
+        values, times = index.get(key, ([], []))
+        return values[bisect_left(times, begin):bisect_right(times, end)]
+    for flow in flows:
+        if flow["correlation_key"]:
+            continue
+        relevant = []
+        begin, end = flow["start_time"]-.000001, flow["start_time"]+(flow["duration"] or 0)+.000001
+        if flow["transport"] in ("tcp", "udp"):
+            index = packet_index
+            origin = (flow["source_ip"], flow["source_port"], flow["destination_ip"], flow["destination_port"])
+            reverse = (origin[2], origin[3], origin[0], origin[1])
+        else:
+            index = ip_index
+            origin, reverse = (flow["source_ip"], flow["destination_ip"]), (flow["destination_ip"], flow["source_ip"])
+        for row in observed_between(index, origin, begin, end) + observed_between(index, reverse, begin, end):
+            if row["frame"] in exact_packets:
+                relevant.append(exact_packets[row["frame"]])
+        if relevant and len(relevant) == flow["origin_packets"] + flow["response_packets"]:
+            flow["correlation_key"] = identity(scope, "exact-recorded-packets", flow["transport"], sorted(relevant))
+            flow["correlation_status"] = "exact_packet_replay"
+
+    by_endpoints = defaultdict(list)
+    for flow in flows:
+        if flow["transport"] == "tcp":
+            by_endpoints[(flow["source_ip"], flow["source_port"], flow["destination_ip"], flow["destination_port"])].append(flow)
+
     def find_flow(row):
         key = endpoints(row)
         reverse = (key[2], key[3], key[0], key[1])
-        candidates = [f for f in flows if f["transport"] == "tcp"
-                      and (f["source_ip"], f["source_port"], f["destination_ip"], f["destination_port"]) in (key, reverse)
-                      and f["start_time"] - .25 <= row["timestamp"] <= f["start_time"] + (f["duration"] or 0) + 2]
+        candidates = [f for f in by_endpoints[key] + by_endpoints[reverse]
+                      if f["start_time"] - .25 <= row["timestamp"] <= f["start_time"] + (f["duration"] or 0) + 2]
         return min(candidates, key=lambda f: abs(f["start_time"] - row["timestamp"])) if candidates else None
 
     def add(flow, row, item):
@@ -174,6 +212,7 @@ def normalize(folder, capture_id, source_id, scope):
                                              "abstract_syntax": row["dicom.pctx.abss.syntax"]}})
 
     for stream, packets in stream_rows.items():
+        frames = {r["frame"]: r for r in packets}
         directions = defaultdict(list)
         for row in packets:
             if not row["tcp.payload"]:
@@ -190,7 +229,7 @@ def normalize(folder, capture_id, source_id, scope):
             messages, message_issues = hl7_messages(chunks)
             issues.extend({**issue, "tcp_stream": stream} for issue in stream_issues + message_issues)
             for item in messages:
-                row = next(r for r in packets if r["frame"] == item["frame"])
+                row = frames[item["frame"]]
                 flow = find_flow(row)
                 if flow:
                     add(flow, row, item)
