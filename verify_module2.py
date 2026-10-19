@@ -52,7 +52,7 @@ def run(args):
         after = store.flows(scope=scope, limit=100000)
         check("Overlapping TCP capture does not inflate canonical connection totals", len([r for r in after if r["transport"] == "tcp"]) == reference,
               correlated_tcp=sum(r["observation_count"] > 1 for r in after if r["transport"] == "tcp"),
-              note="Non-SYN ICMP observations deliberately remain separate")
+              note="Only SYN-supported matches or exact recorded-packet replays correlate; other observations stay separate")
         bad = state/"acceptance-truncated.pcap"
         bad.write_bytes((Path(args.captures)/"pump.pcap").read_bytes()[:-1])
         rejected = False
@@ -72,7 +72,12 @@ def run(args):
         sensor.close()
 
     if args.live:
-        live = Live(store, state, lambda: Sensor(args.sensor_host, state), args.manifest, interval=5)
+        sensors = []
+        def factory():
+            sensor = Sensor(args.sensor_host, state)
+            sensors.append(sensor)
+            return sensor
+        live = Live(store, state, factory, args.manifest, interval=5)
         try:
             live.start()
             print("Waiting for the first passive live analysis cycle (no browser is used)...", flush=True)
@@ -99,6 +104,33 @@ def run(args):
                     break
                 time.sleep(2)
             check("Interrupted pump reader reconnects and analyzes a new capture segment", pump_health.get("reconnects", 0) >= 1 and any(c["processed_at"] > old_time for c in pump_captures), health=pump_health)
+            if args.sensor_recovery:
+                deadline = time.time()+60
+                victim = None
+                while time.time() < deadline:
+                    victim = next((s for s in reversed(sensors) if s.connected()), None)
+                    if victim:
+                        break
+                    time.sleep(.2)
+                if not victim:
+                    raise AssertionError("No owned live sensor SSH connection available for interruption")
+                connections_before, interrupted_at = len(sensors), time.time()
+                # Only this acceptance runner's SSH connection is interrupted, never the VM or another service.
+                victim.client.close()
+                deadline, saw_failure, recovered = time.time()+300, False, False
+                while time.time() < deadline:
+                    health = store.status(live.scope)["health"]
+                    sensor_health = [h for h in health if h["source"].startswith("sensor")]
+                    saw_failure |= any(h.get("error") for h in sensor_health)
+                    fresh = {h["source"] for h in health if h.get("analyzed_at", 0) > interrupted_at and not h.get("analysis_error")}
+                    recovered = saw_failure and len(sensors) > connections_before and set(NORMAL_ROLES).issubset(fresh) and not any(h.get("error") for h in sensor_health)
+                    if recovered:
+                        break
+                    time.sleep(1)
+                check("Interrupted owned sensor SSH reconnects and all normal sources resume analysis", recovered,
+                      interrupted_at=interrupted_at, observed_failure=saw_failure,
+                      fresh_sources=sorted(fresh), new_ssh_connections=len(sensors)-connections_before,
+                      recovery_seconds=time.time()-interrupted_at)
             measurements = []
             for c in store.status(live.scope)["captures"]:
                 flows = [r for r in store.flows(scope=live.scope, limit=100000) if c["capture_id"] in {e["capture_id"] for e in r["evidence"]}]
@@ -123,4 +155,8 @@ if __name__ == "__main__":
     parser.add_argument("--manifest", default="runs/gns3-hospital-v2-manifest.json")
     parser.add_argument("--output", default="runs/module2/acceptance-report.json")
     parser.add_argument("--live", action="store_true")
-    run(parser.parse_args())
+    parser.add_argument("--sensor-recovery", action="store_true", help="With --live, interrupt only this runner's sensor SSH and verify recovery")
+    args = parser.parse_args()
+    if args.sensor_recovery and not args.live:
+        parser.error("--sensor-recovery requires --live")
+    run(args)
