@@ -22,6 +22,8 @@ def packet_rows(path):
     issues, rows = [], []
     with Path(path).open(encoding="utf-8") as source:
         for number, values in enumerate(csv.reader(source, delimiter="\t", quotechar='"'), 1):
+            if len(values) == len(FIELDS)-2:
+                values += ["", ""]  # Historical TSVs predate optional Ethernet fields.
             if len(values) != len(FIELDS):
                 issues.append({"kind": "malformed_packet_row", "line": number})
                 continue
@@ -235,6 +237,39 @@ def normalize(folder, capture_id, source_id, scope):
                     add(flow, row, item)
     for flow in flows:
         medical_port = flow["transport"] == "tcp" and bool({flow["source_port"], flow["destination_port"]} & {2575, 11112})
+        # Link observations are not authenticated IP-to-MAC mappings. In particular,
+        # a routed destination's Ethernet address can be the next hop's address.
+        groups = {}
+        begin = flow["start_time"] - .000001
+        end = flow["start_time"] + (flow["duration"] or 0) + .000001
+        if flow["transport"] in ("tcp", "udp"):
+            key = (flow["source_ip"], flow["source_port"], flow["destination_ip"], flow["destination_port"])
+            candidates = observed_between(packet_index, key, begin, end) + observed_between(packet_index, (key[2], key[3], key[0], key[1]), begin, end)
+        else:
+            key = (flow["source_ip"], flow["destination_ip"])
+            candidates = observed_between(ip_index, key, begin, end) + observed_between(ip_index, key[::-1], begin, end)
+        for row in candidates:
+            if flow["transport"] == "tcp" and not row.get("tcp.srcport"):
+                continue
+            if flow["transport"] == "udp" and not row.get("udp.srcport"):
+                continue
+            if flow["transport"] not in ("tcp", "udp") and (row.get("tcp.srcport") or row.get("udp.srcport")):
+                continue
+            for direction, field in (("source", "eth.src"), ("destination", "eth.dst")):
+                mac = row.get(field, "").lower()
+                if not mac:
+                    continue
+                group = (direction, mac, row["source_ip"], row["destination_ip"])
+                if group not in groups:
+                    groups[group] = {"mac": mac, "ethernet_direction": direction,
+                        "network_source_ip": row["source_ip"], "network_destination_ip": row["destination_ip"],
+                        "capture_id": capture_id, "observation_id": flow["observation_id"],
+                        "observation_source": source_id, "frame": row["frame"], "timestamp": row["timestamp"],
+                        "last_frame": row["frame"], "last_timestamp": row["timestamp"],
+                        "association": "link_observation_only"}
+                else:
+                    groups[group].update(last_frame=row["frame"], last_timestamp=row["timestamp"])
+        flow["link_layer_evidence"] = list(groups.values())
         flow["protocol_status"] = "confirmed" if flow["evidence"] else "unconfirmed" if medical_port else "not_identified"
         if medical_port and not flow["evidence"] and flow["origin_bytes"]+flow["response_bytes"] > 0:
             issues.append({"kind": "unconfirmed_medical_protocol", "observation_id": flow["observation_id"],

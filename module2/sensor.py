@@ -17,7 +17,8 @@ from gns3 import private_url
 FIELDS = ["frame.number", "frame.time_epoch", "ip.src", "ipv6.src", "ip.dst", "ipv6.dst",
           "tcp.srcport", "tcp.dstport", "udp.srcport", "udp.dstport", "tcp.flags.syn",
           "tcp.flags.ack", "tcp.seq_raw", "tcp.len", "tcp.payload", "dicom.assoc.ae.calling",
-          "dicom.assoc.ae.called", "dicom.pctx.abss.syntax", "tcp.stream", "frame.cap_len", "frame.len"]
+          "dicom.assoc.ae.called", "dicom.pctx.abss.syntax", "tcp.stream", "frame.cap_len", "frame.len",
+          "eth.src", "eth.dst"]
 BASE_IMAGE = "zeek/zeek:8.0.10"
 IMAGE = "hiot-module2-sensor:1"
 
