@@ -6,6 +6,17 @@ This is the proposed end-to-end FYP architecture with containment included. It i
 
 ## 1. Project Purpose
 
+### Approved implementation boundary: Module 3 (5 November 2026)
+
+The dedicated Module 3 is **evidence-based observed asset discovery and inventory**,
+consuming Module 2's canonical flows and capture-backed metadata. It persists
+endpoint/communication profiles, separates registry configuration from observations,
+and exposes an inspectable API and inventory views. Device identity/category ML,
+threat/risk scoring and containment remain later modules. See
+[Module 3](<Module 3/README.md>) and its [evaluation](<Module 3/docs/MODULE3_EVALUATION.md>);
+the stage descriptions below are the broader architecture,
+not a claim that every stage is implemented by Module 3.
+
 Help a hospital security operator answer four connected questions:
 
 1. Which endpoints are actually communicating on the monitored network?

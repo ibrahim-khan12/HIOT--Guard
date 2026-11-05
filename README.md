@@ -162,3 +162,15 @@ Use the VM's current address. This command creates/reuses only the current manag
 The `module-2` branch adds an independent Zeek/TShark monitoring pipeline, SQLite connection history, medical-protocol evidence, cross-link TCP correlation, JSONL export and a console on `http://127.0.0.1:8878/`. Module 1 continues to generate traffic on port 8877. Module 2's live mode uses periodic PCAP snapshot analysis, with a visible processing interval and capture health.
 
 Install `requirements-module2.txt`, prepare the pinned Linux sensor, and run `run-module2.cmd`. See [MODULE2.md](MODULE2.md) for setup, the versioned data contract, API, capture retention, test commands and limitations. Actual run results are documented in [MODULE2_EVALUATION.md](MODULE2_EVALUATION.md).
+
+## Module 3 inventory
+
+The independent discovery service consumes Module 2 observations and serves a
+persistent, evidence-backed inventory at `http://127.0.0.1:8879/`.
+Run `"Module 3\run-module3.cmd"` when Module 2 is already available, or use an explicit offline
+import followed by `python -m module3 serve --offline`. This does not start GNS3.
+The implementation, UI, tests, evaluation tools and documentation are organized in
+the [Module 3 folder](<Module 3/README.md>). The root `module3` package is only a
+compatibility entry point for the existing command.
+See the [architecture and commands](<Module 3/docs/MODULE3.md>) and
+[measured evaluation](<Module 3/docs/MODULE3_EVALUATION.md>).
