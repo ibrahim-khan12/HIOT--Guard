@@ -34,6 +34,26 @@ def handler(store, live, port):
             parsed = urlsplit(self.path)
             params = parse_qs(parsed.query)
             scope = params.get("scope", [None])[0] or None
+            if parsed.path == "/api/discovery-revision":
+                from .discovery import revision
+                return self.send(200, revision(store))
+            if parsed.path == "/api/discovery-snapshot.jsonl":
+                from .discovery import snapshot
+                if not scope or len(scope) > 200:
+                    return self.send(400, {"error": "An explicit scope (1..200 characters) is required"})
+                self.connection.settimeout(30)
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/x-ndjson")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.close_connection = True
+                    for raw in snapshot(store, scope):
+                        self.wfile.write(raw)
+                except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, TimeoutError):
+                    pass
+                return
             if parsed.path == "/api/ready":
                 return self.send(200, {"app": "hiot-module2", "pid": os.getpid()})
             if parsed.path == "/":

@@ -48,6 +48,20 @@ class Store:
             if not db.execute("SELECT 1 FROM settings WHERE key='canonical_sql_v1'").fetchone():
                 self._refresh_canonical(db, (r[0] for r in db.execute("SELECT DISTINCT canonical_id FROM observations")))
                 db.execute("INSERT INTO settings VALUES('canonical_sql_v1','true')")
+            import uuid
+            db.execute("INSERT OR IGNORE INTO settings VALUES('discovery_source_id',?)", (json.dumps(str(uuid.uuid4())),))
+            # Metadata retention/path changes must invalidate downstream snapshots too.
+            db.executescript('''
+                CREATE TRIGGER IF NOT EXISTS discovery_capture_insert AFTER INSERT ON captures BEGIN
+                    UPDATE flow_revision SET version=version+1 WHERE id=1;
+                END;
+                CREATE TRIGGER IF NOT EXISTS discovery_capture_update AFTER UPDATE ON captures BEGIN
+                    UPDATE flow_revision SET version=version+1 WHERE id=1;
+                END;
+                CREATE TRIGGER IF NOT EXISTS discovery_capture_delete AFTER DELETE ON captures BEGIN
+                    UPDATE flow_revision SET version=version+1 WHERE id=1;
+                END;
+            ''')
 
     @contextmanager
     def connect(self):
@@ -172,6 +186,7 @@ class Store:
                           capture_ids=sorted({f["capture_id"] for f in observations}),
                           observation_sources=sorted({f["observation_source"] for f in observations}),
                           evidence=[e for f in observations for e in f["evidence"]],
+                          link_layer_evidence=[e for f in observations for e in f.get("link_layer_evidence", [])],
                           byte_count_policy="canonical observation; never sum overlapping links")
             # Keep cached development observations consistent with the public v1 contract.
             if record["transport"] not in ("tcp", "udp"):
