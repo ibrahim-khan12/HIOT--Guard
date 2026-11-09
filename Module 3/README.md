@@ -29,6 +29,17 @@ command views previously imported records without a running sensor.
 The service binds to http://127.0.0.1:8879/. It does not start any VM. Runtime state
 continues to live under ignored runs/module3; moving source does not move or reset it.
 
+For a downloaded delivery ZIP, extract it first and create the environment inside
+its hiot-guard-module3 folder before using the launcher:
+
+    python -m venv .venv
+    .\.venv\Scripts\python.exe -m pip install -r requirements-module2.txt
+    .\.venv\Scripts\python.exe -m module3 serve --offline
+
+A delivery contains source only, so it initially has no hospital inventory.
+Import an authorized Module 2 snapshot or connect to an available monitoring
+service using the commands in the architecture guide.
+
 ## Verify
 
     .\.venv\Scripts\python.exe -m unittest discover -s "Module 3/tests" -v
@@ -41,5 +52,7 @@ Playwright installation. Test fixtures are distinct from captured hospital data.
 
 Read the [architecture and commands](docs/MODULE3.md) and
 [evaluation and outstanding acceptance work](docs/MODULE3_EVALUATION.md).
+The [CI and delivery guide](docs/CI_CD.md) explains automatic browser checks,
+downloadable verified source packages and independent artifact validation.
 The offline/API phase is verified; fresh pinned-sensor MAC and full live hospital
 acceptance remain outstanding. Source organization does not change those claims.
