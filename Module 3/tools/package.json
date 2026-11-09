@@ -1,0 +1,9 @@
+{
+  "name": "hiot-guard-module3-verification",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned browser tooling for Module 3 CI verification",
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}
