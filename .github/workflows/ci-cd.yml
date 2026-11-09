@@ -1,4 +1,3 @@
-
 name: HIoT-Guard CI/CD
 
 on:
@@ -10,6 +9,7 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,40 +18,137 @@ jobs:
   automated-tests:
     name: Run Python Tests
     runs-on: windows-latest
-
+    timeout-minutes: 15
     steps:
       - name: Download repository
         uses: actions/checkout@v4
-
       - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-
       - name: Install dependencies
-        run: |
-          python -m pip install -r requirements-module2.txt
+        run: python -m pip install -r requirements-module2.txt
+      - name: Test Modules 1 and 2
+        run: python -m unittest test_live test_module2 -v
+      - name: Test Module 3 discovery
+        run: python -m unittest discover -s "Module 3/tests" -v
 
-      - name: Run Module 1, Module 2 and discovery tests
+  module3-browser:
+    name: Verify Module 3 Browser
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      RUNTIME_NODE_MODULES: ${{ github.workspace }}/Module 3/tools/node_modules
+      MODULE3_BROWSER_CHANNEL: chromium
+    steps:
+      - name: Download repository
+        uses: actions/checkout@v4
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: Module 3/tools/package-lock.json
+      - name: Install pinned browser tooling
+        run: npm ci --prefix "Module 3/tools" --ignore-scripts --no-audit --no-fund
+      - name: Install Chromium
+        run: node "Module 3/tools/node_modules/playwright/cli.js" install chromium
+      - name: Verify desktop and mobile with synthetic fixtures
+        run: python "Module 3/tools/verify_module3_browser.py" --fixture --port 8889 --output runs/module3-ci/browser
+      - name: Save browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: module3-browser-evidence
+          path: |
+            runs/module3-ci/browser/*.png
+            runs/module3-ci/browser/report.json
+            runs/module3-ci/browser/filtered-inventory.jsonl
+          if-no-files-found: warn
+          retention-days: 14
+
+  package-module3:
+    name: Prepare Module 3 Delivery
+    needs: [automated-tests, module3-browser]
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/module-3' || github.ref == 'refs/heads/main')
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download repository
+        uses: actions/checkout@v4
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install smoke-test dependencies
+        run: python -m pip install -r requirements-module2.txt
+      - name: Build committed-source release
+        run: python "Module 3/tools/package_module3.py" --output runs/module3-delivery
+      - name: Verify extracted release
+        run: python "Module 3/tools/package_module3.py" --verify runs/module3-delivery/hiot-guard-module3.zip | Tee-Object -FilePath runs/module3-delivery/smoke.json
+      - name: Upload tested Module 3 delivery
+        uses: actions/upload-artifact@v4
+        with:
+          name: hiot-guard-module3
+          path: runs/module3-delivery/*
+          if-no-files-found: error
+          retention-days: 30
+
+  verify-module3-delivery:
+    name: Verify Downloaded Module 3 Delivery
+    needs: package-module3
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Download delivery without a source checkout
+        uses: actions/download-artifact@v4
+        with:
+          name: hiot-guard-module3
+          path: delivery
+      - name: Check archive checksum and unpack
+        shell: pwsh
         run: |
-          python -m unittest test_live test_module2 -v
-          python -m unittest discover -s "Module 3/tests" -v
+          $archive = Join-Path $env:GITHUB_WORKSPACE "delivery/hiot-guard-module3.zip"
+          $expected = (Get-Content -LiteralPath "$archive.sha256" -Raw).Split(' ')[0].Trim()
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Module 3 delivery checksum mismatch" }
+          $unpack = Join-Path $env:RUNNER_TEMP "module3-downloaded-delivery"
+          Expand-Archive -LiteralPath $archive -DestinationPath $unpack
+          $release = Join-Path $unpack "hiot-guard-module3"
+          "MODULE3_RELEASE_ROOT=$release" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Install dependencies from delivered requirements
+        run: python -m pip install -r "$env:MODULE3_RELEASE_ROOT/requirements-module2.txt"
+      - name: Verify delivered tests and API independently
+        run: python "$env:MODULE3_RELEASE_ROOT/Module 3/tools/package_module3.py" --verify "$env:GITHUB_WORKSPACE/delivery/hiot-guard-module3.zip" | Tee-Object -FilePath delivery/independent-smoke.json
+      - name: Save independent delivery verification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: module3-delivery-verification
+          path: delivery/independent-smoke.json
+          if-no-files-found: warn
+          retention-days: 30
 
   package-module2:
     name: Prepare Module 2 Delivery
     needs: automated-tests
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: windows-latest
-
     steps:
       - name: Download repository
         uses: actions/checkout@v4
-
       - name: Create release package
         shell: pwsh
         run: |
           Compress-Archive -Path module2, MODULE2.md, requirements-module2.txt, requirements.txt, launch_module2.py, run-module2.cmd -DestinationPath module2-release.zip
-
       - name: Upload release package
         uses: actions/upload-artifact@v4
         with:
