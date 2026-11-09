@@ -21,9 +21,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Download repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.13"
       - name: Install dependencies
@@ -42,13 +42,13 @@ jobs:
       MODULE3_BROWSER_CHANNEL: chromium
     steps:
       - name: Download repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.13"
       - name: Install Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: "22"
           cache: npm
@@ -61,7 +61,7 @@ jobs:
         run: python "Module 3/tools/verify_module3_browser.py" --fixture --port 8889 --output runs/module3-ci/browser
       - name: Save browser evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: module3-browser-evidence
           path: |
@@ -79,9 +79,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Download repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.13"
       - name: Install smoke-test dependencies
@@ -91,7 +91,7 @@ jobs:
       - name: Verify extracted release
         run: python "Module 3/tools/package_module3.py" --verify runs/module3-delivery/hiot-guard-module3.zip | Tee-Object -FilePath runs/module3-delivery/smoke.json
       - name: Upload tested Module 3 delivery
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: hiot-guard-module3
           path: runs/module3-delivery/*
@@ -105,11 +105,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.13"
       - name: Download delivery without a source checkout
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.2
         with:
           name: hiot-guard-module3
           path: delivery
@@ -130,7 +130,7 @@ jobs:
         run: python "$env:MODULE3_RELEASE_ROOT/Module 3/tools/package_module3.py" --verify "$env:GITHUB_WORKSPACE/delivery/hiot-guard-module3.zip" | Tee-Object -FilePath delivery/independent-smoke.json
       - name: Save independent delivery verification
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: module3-delivery-verification
           path: delivery/independent-smoke.json
@@ -144,13 +144,13 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Download repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
       - name: Create release package
         shell: pwsh
         run: |
           Compress-Archive -Path module2, MODULE2.md, requirements-module2.txt, requirements.txt, launch_module2.py, run-module2.cmd -DestinationPath module2-release.zip
       - name: Upload release package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: hiot-guard-module2
           path: module2-release.zip
