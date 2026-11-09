@@ -5,10 +5,12 @@ const require=createRequire(import.meta.url);
 const {chromium}=require(process.env.RUNTIME_NODE_MODULES?path.join(process.env.RUNTIME_NODE_MODULES,'playwright'):'playwright');
 const output=path.resolve(process.argv[2]||'runs/module3-evaluation/browser');
 const base=process.env.MODULE3_URL||'http://127.0.0.1:8879';
+const referenceScope=process.env.MODULE3_REFERENCE_SCOPE||'acceptance-1792340111388501600';
+const channel=process.env.MODULE3_BROWSER_CHANNEL||'chrome';
 await fs.mkdir(output,{recursive:true});
-const report={checks:[],errors:[],base};
+const report={checks:[],errors:[],base,test_data:process.env.MODULE3_TEST_DATA||'unspecified',reference_scope:referenceScope,browser_channel:channel};
 function check(name,passed,facts={}){report.checks.push({name,passed:!!passed,...facts});if(!passed)throw Error(name);}
-const browser=await chromium.launch({headless:true,channel:'chrome'});
+const browser=await chromium.launch(channel==='chromium'?{headless:true}:{headless:true,channel});
 try{
  const page=await browser.newPage({viewport:{width:1440,height:1000},acceptDownloads:true});
  page.on('pageerror',e=>report.errors.push(e.message));
@@ -22,7 +24,7 @@ try{
  await page.locator('#next').click();
  await page.waitForFunction(id=>document.querySelector('#assetRows tr[data-id]')?.dataset.id!==id,first);
  check('Inventory pagination advances',(await page.locator('#pageLabel').textContent()).includes('26'));
- await page.locator('#scope').selectOption('acceptance-1792340111388501600');
+ await page.locator('#scope').selectOption(referenceScope);
  await page.locator('#search').fill('10.77.20.20');
  await page.waitForFunction(()=>document.querySelectorAll('#assetRows tr[data-id]').length===1);
  await page.locator('#assetRows button').first().press('Enter');
@@ -66,4 +68,5 @@ try{
  check('Mobile health has no page overflow',await mobile.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
  await mobile.screenshot({path:path.join(output,'mobile-health.png'),fullPage:true});
  check('No browser JavaScript errors',report.errors.length===0);
-}catch(e){report.errors.push(e.stack);}finally{await browser.close();report.passed=report.checks.length>=16&&report.checks.every(x=>x.passed)&&report.errors.length===0;await fs.writeFile(path.join(output,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));if(!report.passed)process.exitCode=1;}
+}catch(e){report.errors.push(e.stack);await pageFailureScreenshot().catch(()=>{});}finally{await browser.close();report.passed=report.checks.length>=16&&report.checks.every(x=>x.passed)&&report.errors.length===0;await fs.writeFile(path.join(output,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));if(!report.passed)process.exitCode=1;}
+async function pageFailureScreenshot(){const pages=browser.contexts().flatMap(c=>c.pages());if(pages.length)await pages[0].screenshot({path:path.join(output,'failure.png'),fullPage:true});}
