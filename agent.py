@@ -15,6 +15,8 @@ from pynetdicom import AE, evt
 from pynetdicom.sop_class import (CTImageStorage, DigitalXRayImageStorageForPresentation,
                                   MRImageStorage, UltrasoundImageStorage, Verification)
 from config import NORMAL_ROLES, ROLES, SERVICE_PORTS, address
+from scenario_actor import ScenarioActor
+from scenario_profile import PROFILE, ROLE_IPS
 
 
 def synthetic_image(role):
@@ -50,9 +52,12 @@ def synthetic_image(role):
 
 
 class Agent:
-    def __init__(self, role, mode):
+    def __init__(self, role, mode, profile=None):
         self.role, self.mode = role, mode
-        self.ip = address(role, mode)
+        if role in ROLE_IPS and (mode != "gns3" or profile != PROFILE):
+            raise ValueError("Scenario actors require the isolated GNS3 profile")
+        self.ip = ROLE_IPS[role] if role in ROLE_IPS else address(role, mode)
+        self.scenario = ScenarioActor(self) if profile == PROFILE and mode == "gns3" else None
         self.running = False
         self.lock = threading.RLock()
         self.traffic_lock = threading.Lock()
@@ -114,6 +119,10 @@ class Agent:
         if self.role == "gateway":
             subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=1"], check=True)
             self.apply_policy(self.policy)
+        elif self.role in ROLE_IPS:
+            # These actors have one adapter and only a connected lab subnet.
+            if subprocess.check_output(["ip", "route", "show", "default"], text=True).strip():
+                raise RuntimeError("Unexpected default route on isolated scenario actor")
         else:
             gateway = self.ip.rsplit(".", 1)[0] + ".1"
             subprocess.run(["ip", "route", "replace", "default", "via", gateway], check=True)
@@ -268,11 +277,13 @@ class Agent:
             threading.Thread(target=server.serve_forever, daemon=True).start()
             self.servers.append(server)
 
-    def connect(self, target, port):
+    def connect(self, target, port, before_connect=None, timeout=1):
         sock = socket.socket()
-        sock.settimeout(1)
+        sock.settimeout(timeout)
         sock.bind((self.ip, 0))
         try:
+            if before_connect:
+                before_connect(sock.getsockname()[1])
             sock.connect((address(target, self.mode), port))
             return sock
         except Exception:
@@ -366,7 +377,26 @@ class Agent:
             with self.lock:
                 self.command["running"] = False
 
-    def action(self, operation):
+    def scenario_probe(self, target, port, operation, description, deadline):
+        trace = {"source_port": None}
+
+        def bound(local_port):
+            trace.update(source_port=local_port, started=time.time())
+
+        try:
+            timeout = min(1, deadline - time.monotonic()) if deadline is not None else 1
+            if timeout <= 0:
+                return None
+            sock = self.connect(target, port) if deadline is None else self.connect(target, port, bound, timeout)
+            with sock:
+                outcome = self.record(operation, True, description)
+        except OSError as error:
+            outcome = self.record(operation, False, error)
+        if deadline is None:
+            return outcome
+        return {**outcome, **trace, "destination_ip": address(target, self.mode), "destination_port": port}
+
+    def action(self, operation, cancelled=None, deadline=None):
         if operation == "start":
             with self.traffic_lock:
                 if not self.running:
@@ -396,40 +426,40 @@ class Agent:
             # Eight connect attempts only, against two configured disposable lab services.
             for target in ("pacs", "ehr"):
                 for port in (445, 3389, 11112, 8081):
-                    if generation != self.probe_generation:
+                    if generation != self.probe_generation or (cancelled and cancelled.is_set()):
                         return results
-                    try:
-                        with self.connect(target, port):
-                            results.append(self.record(f"Connect {target}:{port}", True, "TCP connected; no exploit sent"))
-                    except OSError as error:
-                        results.append(self.record(f"Connect {target}:{port}", False, error))
-                    time.sleep(0.25)
+                    attempt = self.scenario_probe(target, port, f"Connect {target}:{port}", "TCP connected", deadline)
+                    if attempt is None:
+                        return results
+                    results.append(attempt)
+                    cancelled.wait(0.25) if cancelled else time.sleep(0.25)
             return results
         if operation == "anomaly" and self.role == "pump":
             results = []
             generation = self.probe_generation
             for _ in range(4):
-                if generation != self.probe_generation:
+                if generation != self.probe_generation or (cancelled and cancelled.is_set()):
                     return results
-                try:
-                    with self.connect("pacs", 11112):
-                        results.append(self.record("Unexpected pump imaging connection", True, "TCP connected; no DICOM data sent"))
-                except OSError as error:
-                    results.append(self.record("Unexpected pump imaging connection", False, error))
-                time.sleep(0.3)
+                attempt = self.scenario_probe("pacs", 11112, "Unexpected pump imaging connection", "TCP connected", deadline)
+                if attempt is None:
+                    return results
+                results.append(attempt)
+                cancelled.wait(0.3) if cancelled else time.sleep(0.3)
             return results
         raise ValueError("Action is not supported by this lab role")
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--role", choices=ROLES, default=os.environ.get("LAB_ROLE", "workstation"))
+    parser.add_argument("--role", choices=(*ROLES, *ROLE_IPS), default=os.environ.get("LAB_ROLE", "workstation"))
     parser.add_argument("--mode", choices=("local", "gns3"), default=os.environ.get("LAB_MODE", "gns3"))
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
-    agent = Agent(args.role, args.mode)
+    agent = Agent(args.role, args.mode, os.environ.get("LAB_PROFILE"))
     agent.configure_network()
     agent.start_services()
+    if agent.scenario:
+        agent.scenario.start_services()
 
     class Control(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -445,13 +475,13 @@ def main():
         def do_GET(self):
             if self.path == "/":
                 actions = ["start", "stop", "probe"] if agent.role in NORMAL_ROLES else ["probe"] if agent.role == "unregistered" else []
-                if agent.role == "workstation":
+                if agent.role == "workstation" and not agent.scenario:
                     actions.append("recon")
-                if agent.role == "pump":
+                if agent.role == "pump" and not agent.scenario:
                     actions.append("anomaly")
                 page = ("<!doctype html><html lang='en'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
                         "<title>IoMT Lab Actor</title><style>body{font:14px Segoe UI,Arial;margin:24px;color:#21343a}h1{font-size:20px}button{padding:9px 14px;margin:0 8px 10px 0;background:white;border:1px solid #91afb2;border-radius:4px;cursor:pointer}pre{background:#f4f7f8;padding:16px;white-space:pre-wrap;overflow-wrap:anywhere}</style>"
-                        f"<h1>{html.escape(ROLES[agent.role]['name'])}</h1><p>{html.escape(agent.ip)} / {html.escape(agent.mode)}</p>"
+                        f"<h1>{html.escape(ROLES.get(agent.role, {}).get('name', agent.role))}</h1><p>{html.escape(agent.ip)} / {html.escape(agent.mode)}</p>"
                         + "".join(f"<button data-action='{action}'>{action.title()}</button>" for action in actions)
                         + "<p id='notice' role='status'></p><pre id='state'>Connecting...</pre><script>let sending=false,refreshing=false;"
                         "function controls(disabled){document.querySelectorAll('[data-action]').forEach(b=>b.disabled=disabled)}"
@@ -463,6 +493,8 @@ def main():
                 self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
                 return self.wfile.write(raw)
+            if self.path == "/scenario" and agent.scenario:
+                return self.respond(200, agent.scenario.status())
             if self.path != "/state":
                 return self.respond(404, {"error": "Not found"})
             self.respond(200, agent.state())
@@ -475,8 +507,12 @@ def main():
                 data = json.loads(self.rfile.read(length))
                 if self.path == "/policy":
                     return self.respond(200, agent.apply_policy(data))
+                if self.path == "/scenario" and agent.scenario:
+                    return self.respond(200, agent.scenario.action(data))
                 if self.path != "/action":
                     return self.respond(404, {"error": "Not found"})
+                if agent.scenario and data.get("action") in ("recon", "anomaly"):
+                    raise ValueError("Start routed scenarios from the Module 1 scenario panel")
                 if data.get("background") is True:
                     return self.respond(202, agent.begin_command(data.get("action"), data.get("request_id")))
                 self.respond(200, agent.action(data.get("action")))
