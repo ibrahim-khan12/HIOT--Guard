@@ -1,0 +1,5 @@
+FROM iomt-hospital:2
+RUN apt-get update && apt-get install -y --no-install-recommends mosquitto \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir paho-mqtt==2.1.0
+COPY agent.py config.py scenario_profile.py scenario_actor.py ./
