@@ -50,7 +50,7 @@ Starting a GNS3 session without importing or registering this archive remains su
 5. Select **Check clinical paths**. All twelve normal-source checks should succeed. Inspect the per-source results, PACS/EHR/pump service receipts, and recent packets on the same page. Service totals can persist across sessions; they are not per-session throughput measurements.
 6. Select **Download session JSON** to export the backend's full session evidence. Use **Pause traffic** when idle and **End session** to close capture and save the session report and PCAPs.
 
-The browser is the **Module 1 traffic-generation view**. Attack, risk, quarantine, and reviewer-approval controls are omitted from this interface. Existing detection/response code and the automated `verify_gns3.py` evaluation remain available for development. If restrictions were applied externally, the page displays a **Restore baseline paths** command. The earlier `DEMO_GUIDE.md` describes the broader prototype workflow and its old control names.
+The browser is the **Module 1 traffic-generation view**. Select **GNS3 controlled scenarios** for observe-only tests alongside normal hospital traffic. See [the scenario setup and verification guide](SCENARIOS.md). The original **GNS3 routed lab** profile supports the automated `verify_gns3.py` containment evaluation. If restrictions are active in that profile, the page offers **Restore baseline paths**.
 
 Native enforcement is a peer-IP service ACL at disposable PACS/EHR/pump services. It is NOT routed network isolation, an OS firewall, or GNS3. The Module 1 page identifies the selected runtime and packet source.
 
