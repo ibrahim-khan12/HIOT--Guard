@@ -15,12 +15,14 @@ from pathlib import Path
 from config import AGENT_PORTS, CAPTURE_ROLES, NORMAL_ROLES, ROLES, address
 from gns3 import GNS3, request_json
 from monitor import Capture, Engine
+from scenario_profile import PROFILE, capture_sources
+from scenario_runs import ScenarioRuns
 
 ROOT = Path(__file__).resolve().parent
 
 
 class Lab:
-    def __init__(self, folder=ROOT / "runs"):
+    def __init__(self, folder=ROOT / "runs", monitor_port=8878):
         self.folder = Path(folder)
         self.mode = None
         self.engine = None
@@ -36,6 +38,8 @@ class Lab:
         self.approval = None
         self.session = None
         self.generation = 0
+        self.observe_only = False
+        self.scenarios = ScenarioRuns(self, monitor_port)
         threading.Thread(target=self.response_loop, daemon=True).start()
 
     def agent(self, role, endpoint, data=None):
@@ -43,7 +47,7 @@ class Lab:
             return self.adapter.agent(role, endpoint, data)
         return request_json(f"http://127.0.0.1:{AGENT_PORTS[role]}{endpoint}", data, timeout=15)
 
-    def start(self, mode, url=None):
+    def start(self, mode, url=None, profile=None):
         if self.mode:
             raise ValueError("Stop the current lab before starting a different capture session")
         self.error = None
@@ -52,10 +56,14 @@ class Lab:
         self.approval = None
         self.last_result = None
         self.generation += 1
+        self.observe_only = mode == "gns3" and profile == PROFILE
+        self.scenarios.reset()
         generation = self.generation
         self.session = self.folder / time.strftime("%Y%m%d-%H%M%S")
+        if self.observe_only:
+            self.session = self.session.with_name(self.session.name + f"-scenarios-{time.time_ns()}")
         self.session.mkdir(parents=True, exist_ok=True)
-        self.engine = Engine(mode, lambda ip, policy: self.jobs.put((ip, policy, None, generation)))
+        self.engine = Engine(mode, None if self.observe_only else lambda ip, policy: self.jobs.put((ip, policy, None, generation)))
         self.mode = mode
         try:
             if mode == "local":
@@ -87,11 +95,11 @@ class Lab:
                 interface = os.environ.get("IOMT_INTERFACE", r"\Device\NPF_Loopback" if os.name == "nt" else "lo")
                 self.captures.append(Capture(self.engine, self.session / "native.pcapng", interface=interface))
             elif mode == "gns3":
-                self.adapter = GNS3(url, self.folder)
+                self.adapter = GNS3(url, self.folder, profile=profile)
                 self.adapter.build()
                 self.adapter.start()
                 self.policy = self.agent("gateway", "/state")["policy"]
-                for role in CAPTURE_ROLES:
+                for role in capture_sources(self.adapter.manifest, CAPTURE_ROLES):
                     self.captures.append(Capture(self.engine, self.session / (role + ".pcap"), stream=self.adapter.stream(role), name=role))
             else:
                 raise ValueError("Unknown lab mode")
@@ -108,7 +116,7 @@ class Lab:
             ip, policy, reviewer, generation = self.jobs.get()
             try:
                 with self.busy:
-                    if generation == self.generation and self.mode and self.engine and ip in self.engine.registry:
+                    if generation == self.generation and self.mode and self.engine and not self.observe_only and ip in self.engine.registry:
                         self.enforce(ip, policy, reviewer)
             except Exception as error:
                 self.error = str(error)
@@ -119,6 +127,8 @@ class Lab:
                 self.jobs.task_done()
 
     def enforce(self, ip, policy, reviewer=None):
+        if self.observe_only:
+            raise ValueError("Firewall actions are disabled in the observe-only profile")
         role = self.engine.registry[ip]["role"]
         desired = dict(self.policy)
         if role not in desired:
@@ -146,13 +156,25 @@ class Lab:
     def action(self, data):
         operation = data.get("action")
         if operation in ("start-local", "start-gns3"):
-            self.start("local" if operation == "start-local" else "gns3", data.get("url"))
+            profile = data.get("profile")
+            if profile is not None and (operation != "start-gns3" or profile != PROFILE):
+                raise ValueError("Unknown profile for this runtime")
+            self.start("local" if operation == "start-local" else "gns3", data.get("url"), profile)
             return {"operation": operation, "success": True}
         if operation == "stop-lab":
             self.stop()
             return {"operation": operation, "success": True}
         if not self.mode:
             raise ValueError("Start a capture session first")
+        if operation == "run-scenario":
+            return self.scenarios.start(data)
+        if operation == "cancel-scenario" and self.observe_only:
+            self.scenarios.cancel()
+            return self.scenarios.summary()
+        if self.observe_only and operation in ("reset", "approve", "recon", "anomaly"):
+            raise ValueError("Use the scenario controls in the observe-only profile")
+        if self.scenarios.summary()["active"] and operation in ("pause", "verify", "unknown"):
+            raise ValueError("Cancel or finish the scenario before changing normal traffic or running checks")
         if operation in ("normal", "recon", "anomaly", "unknown") and any(c.process.poll() is not None or c.error for c in self.captures):
             raise ValueError("The packet capture is no longer healthy. Stop and restart the session before generating more traffic.")
         if operation in ("normal", "pause"):
@@ -208,12 +230,14 @@ class Lab:
                 for asset in self.engine.assets.values():
                     if asset["role"] in self.policy:
                         asset["policy"] = self.policy[asset["role"]]
-        return {"app": "iomt-live-v1", "mode": self.mode, "enforcement": "Linux gateway firewall" if self.mode == "gns3" else "Local service ACL test" if self.mode else "Not connected",
+        return {"app": "iomt-live-v1", "mode": self.mode, "enforcement": "Observe only" if self.mode and self.observe_only else "Linux gateway firewall" if self.mode == "gns3" else "Local service ACL test" if self.mode else "Not connected",
+                "observeOnly": bool(self.mode and self.observe_only), "scenarios": self.scenarios.summary(),
                 "capture": [c.state() for c in self.captures], "monitor": self.engine.snapshot() if self.engine else {"assets": [], "packets": [], "events": [], "frames": 0},
                 "policy": self.policy, "endpoints": states, "lastResult": self.last_result, "error": self.error,
                 "approval": self.approval, "project": self.adapter.manifest if self.adapter else None}
 
     def stop(self):
+        self.scenarios.cancel(wait=True)
         self.generation += 1
         if self.captures and self.engine:
             report = {"generated": time.time(), "scope": "Isolated lab emulators; no real medical equipment", **self.status()}
@@ -250,8 +274,9 @@ class Lab:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8877)
+    parser.add_argument("--monitor-port", type=int, default=8878)
     args = parser.parse_args()
-    lab = Lab()
+    lab = Lab(monitor_port=args.monitor_port)
     atexit.register(lab.stop)
 
     class API(BaseHTTPRequestHandler):

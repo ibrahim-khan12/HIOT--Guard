@@ -58,6 +58,8 @@ def verify(backend, controller, output):
             raise ValueError("The selected backend is not the live IoMT PoC")
         if state["mode"] and (state["mode"] != "gns3" or state["project"]["server"] != controller):
             raise ValueError("Stop the other session before testing this GNS3 lab")
+        if state.get("observeOnly"):
+            raise ValueError("End the observe-only session and select the original GNS3 routed lab for containment")
         if not state["mode"]:
             action("start-gns3", url=controller)
         action("reset")
@@ -94,11 +96,15 @@ def verify(backend, controller, output):
         wait_for(lambda s: s["policy"]["workstation"] == "quarantined", "gateway quarantine")
         quarantined = action("verify")["result"]
         require_paths(quarantined, False, True)
+        blocked_recon = action("recon")["result"]
+        if len(blocked_recon) != 8 or any(attempt["success"] for attempt in blocked_recon):
+            raise AssertionError("All eight fresh workstation reconnaissance attempts must fail after quarantine")
         state = get("/api/status")
         workstation = next(a for a in state["monitor"]["assets"] if a["role"] == "workstation")
         if workstation["peakRisk"] != 85 or dropped_packets(state["endpoints"]["gateway"]["firewall"], "10.77.10.10") == 0:
             raise AssertionError("Measured risk 85 and a nonzero workstation DROP counter are required")
-        record("Workstation blocked by gateway; medical paths preserved", quarantined)
+        record("Workstation blocked by gateway; medical paths preserved",
+               {"clinical": quarantined, "unexpected": blocked_recon})
 
         action("anomaly")
         wait_for(lambda s: s["policy"]["pump"] == "restricted", "pump restriction")

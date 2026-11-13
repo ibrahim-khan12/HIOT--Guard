@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 from pathlib import Path
 
 from .sensor import Sensor
@@ -26,6 +27,11 @@ def main():
     sub.add_parser("status")
     archive = sub.add_parser("archive-history", help="Back up and prune closed live scopes, preserving raw files")
     archive.add_argument("--before-unix", type=float, required=True)
+    observations = sub.add_parser("packet-observations", help="Export UDP, MQTT and ARP packet evidence from one capture link")
+    observations.add_argument("--scope", required=True)
+    observations.add_argument("--source", required=True)
+    observations.add_argument("--begin", type=float, required=True, help="Inclusive Unix timestamp")
+    observations.add_argument("--end", type=float, required=True, help="Inclusive Unix timestamp")
     server = sub.add_parser("serve")
     server.add_argument("--manifest", default="runs/gns3-hospital-v2-manifest.json")
     server.add_argument("--port", default=8878, type=int)
@@ -34,6 +40,13 @@ def main():
     server.add_argument("--window", default=30, type=int)
     args = parser.parse_args()
     state = Path(args.state).resolve()
+    if args.command == "packet-observations":
+        if not (math.isfinite(args.begin) and math.isfinite(args.end) and 0 < args.end - args.begin <= 900):
+            parser.error("Use a finite window of at most 900 seconds")
+        from .scenario_evidence import packet_observations
+        for observation in packet_observations(state, args.scope, args.source, args.begin, args.end):
+            print(json.dumps(observation))
+        return
     store = Store(state / "monitoring.sqlite3")
     factory = lambda: Sensor(args.sensor_host, state, args.sensor_user, persistent=True)
     if args.command == "setup-sensor":

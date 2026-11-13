@@ -5,5 +5,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends iproute2 iptabl
 WORKDIR /lab
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY agent.py config.py ./
+COPY agent.py config.py scenario_profile.py scenario_actor.py ./
 CMD ["python", "/lab/agent.py"]

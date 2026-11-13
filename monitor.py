@@ -131,8 +131,9 @@ class Engine:
                     elif source["role"] == "workstation" and source["risk"] >= 85 and source["response"] == "none":
                         response = (src, "quarantined")
                     if response:
-                        source["response"] = "pending"
-                        self.event("DETECTION", f"Risk {source['risk']}; {len(unexpected)} unexpected attempts, {services} target/service pairs, {destinations} destinations in 60s. Requested {response[1]}; not proof of ransomware.", src)
+                        source["response"] = "pending" if self.respond else "observed"
+                        action = f"Requested {response[1]}" if self.respond else "Observe-only recording"
+                        self.event("DETECTION", f"Risk {source['risk']}; {len(unexpected)} unexpected attempts, {services} target/service pairs, {destinations} destinations in 60s. {action}.", src)
         if response and self.respond:
             self.respond(*response)
 
@@ -192,6 +193,8 @@ class Capture:
                 while not self.stopping:
                     chunk = self.stream.read1(65536)
                     if not chunk:
+                        if not self.stopping:
+                            self.error = "GNS3 capture stream ended"
                         break
                     file.write(chunk)
                     file.flush()

@@ -36,6 +36,8 @@ def handler(store, live, port):
             scope = params.get("scope", [None])[0] or None
             if parsed.path == "/api/ready":
                 return self.send(200, {"app": "hiot-module2", "pid": os.getpid()})
+            if parsed.path == "/api/capture-context":
+                return self.send(200, live.capture_context())
             if parsed.path == "/":
                 return self.send(200, Path(__file__).with_name("index.html").read_bytes(), "text/html; charset=utf-8")
             if parsed.path == "/api/status":

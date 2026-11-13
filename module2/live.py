@@ -10,6 +10,7 @@ import uuid
 
 from gns3 import GNS3
 from config import CAPTURE_ROLES
+from scenario_profile import PROFILE, capture_sources
 from .parsing import identity
 from .pcap import MAGICS, complete_pcap, snapshot
 from .pipeline import Pipeline
@@ -17,11 +18,12 @@ from .retention import archive_processed
 
 
 class Spool:
-    def __init__(self, root, source, scope, store, limit=4*1024*1024, window=30):
+    def __init__(self, root, source, scope, store, limit=4*1024*1024, window=30, keep_evidence=False):
         self.root, self.source, self.scope, self.store = Path(root), source, scope, store
         self.root.mkdir(parents=True, exist_ok=True)
         self.limit, self.lock = limit, threading.RLock()
         self.window, self.opened_at = window, time.monotonic()
+        self.keep_evidence = keep_evidence
         self.buffer, self.header, self.segments = bytearray(), None, []
         self.processed, self.counter = {}, 0
         for path in sorted(self.root.glob("segment-*.pcap")):
@@ -49,7 +51,8 @@ class Spool:
             old = self.segments[0]
             if old["bytes"] > 24 and self.processed.get(old["id"], 0) < old["bytes"]:
                 raise BufferError("Analysis cannot keep up with the two-segment raw retention budget")
-            self.store.expire_raw(old["id"])
+            if not self.keep_evidence:
+                self.store.expire_raw(old["id"])
             old["path"].unlink(missing_ok=True)
             self.segments.pop(0)
         self.counter += 1
@@ -106,6 +109,8 @@ class Live:
         self.manifest_path, self.interval = Path(manifest), interval
         self.stop_event = threading.Event()
         self.threads, self.streams, self.spools = [], {}, {}
+        self.stream_epochs = {}
+        self.recording_instance = None
         self.lock = threading.RLock()
         self.running = False
         self.workers, self.window = workers, window
@@ -138,16 +143,19 @@ class Live:
         if self.running:
             return
         manifest = json.loads(self.manifest_path.read_text())
-        if not manifest.get("complete") or not set(CAPTURE_ROLES).issubset(manifest.get("links", {})):
-            raise ValueError("A complete Module 1 manifest with all actor capture links is required")
-        self.adapter = GNS3(manifest["server"], self.manifest_path.parent)
+        sources = capture_sources(manifest, CAPTURE_ROLES)
+        self.adapter = GNS3(manifest["server"], self.manifest_path.parent, profile=manifest.get("profile"))
         self.adapter.manifest = manifest
         prior = self.store.setting("live") or {}
         self.scope = prior["scope"] if prior.get("enabled") and prior.get("manifest") == str(self.manifest_path.resolve()) else "live-" + uuid.uuid4().hex
         self.stop_event.clear()
+        self.stream_epochs.clear()
+        self.recording_instance = uuid.uuid4().hex
         self.started_at = time.time()
         self.store.health("sensor", state="connecting", error=None, analysis_error=None)
-        self.spools = {source: Spool(self.state / "live" / self.scope / source, source, self.scope, self.store, window=self.window) for source in CAPTURE_ROLES}
+        self.spools = {source: Spool(self.state / "live" / self.scope / source, source, self.scope, self.store,
+                                     window=self.window, keep_evidence=manifest.get("profile") == PROFILE)
+                       for source in sources}
         try:
             archive_processed(self.store, self.state, required=8*1024*1024)
         except BufferError as error:
@@ -155,10 +163,20 @@ class Live:
             self.store.health("sensor", state="limited", error=str(error))
         self.running = True
         self.store.setting("live", {"enabled": True, "scope": self.scope, "manifest": str(self.manifest_path.resolve()), "interval": self.interval})
-        self.threads = [threading.Thread(target=self.read, args=(source,), daemon=True) for source in CAPTURE_ROLES]
+        self.threads = [threading.Thread(target=self.read, args=(source,), daemon=True) for source in sources]
         self.threads.append(threading.Thread(target=self.analyze, daemon=True))
         for thread in self.threads:
             thread.start()
+
+    def capture_context(self):
+        adapter = getattr(self, "adapter", None)
+        manifest = adapter.manifest if adapter else {}
+        with self.lock:
+            streams = {source: self.stream_epochs[source] for source in self.streams}
+        return {"scope": getattr(self, "scope", None), "project_id": manifest.get("project_id"),
+                "recording_instance": self.recording_instance,
+                "server": manifest.get("server"), "links": manifest.get("links", {}),
+                "collector": self.status(), "streams": streams}
 
     def read(self, source):
         failures = 0
@@ -170,6 +188,7 @@ class Live:
                 stream = self.adapter.stream(source)
                 with self.lock:
                     self.streams[source] = stream
+                    self.stream_epochs[source] = self.stream_epochs.get(source, 0) + 1
                 self.store.health(source, state="waiting_for_packets", error=None)
                 self.spools[source].reconnect()
                 while not self.stop_event.is_set():

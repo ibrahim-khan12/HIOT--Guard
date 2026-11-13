@@ -13,6 +13,7 @@
 .session-heading{font-size:15px;font-weight:650;cursor:pointer;line-height:1.5}.session-heading span{display:block;color:var(--muted);font-size:11px;font-weight:400;margin-top:8px}.session-heading::marker{font-size:10px}
 @media(max-width:760px){.session{order:0;padding:12px 16px;border-top:0;border-bottom:1px solid var(--line)}.workspace{order:1}.session-heading{font-size:13px}.session-heading span{display:inline;margin:0 0 0 8px;font-size:10px}.session-meta{margin-top:16px;padding-top:14px}.capture-details{margin-top:16px}}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+#scenarioChoice{width:auto;max-width:100%;min-width:min(245px,100%)}
 </style>
 </head>
 <body>
@@ -21,7 +22,7 @@
 <aside class="session" aria-label="Lab connection">
   <details id="sessionPanel" open><summary class="session-heading">Lab session <span id="sessionStatus">No active capture</span></summary>
   <div class="session-settings">
-    <div class="field"><label for="mode">Runtime</label><select id="mode"><option value="gns3">GNS3 routed lab</option><option value="local">Native capture lab</option></select></div>
+    <div class="field"><label for="mode">Runtime</label><select id="mode"><option value="gns3">GNS3 routed lab</option><option value="scenario">GNS3 controlled scenarios</option><option value="local">Native capture lab</option></select></div>
     <div class="field"><label for="gns3Url">GNS3 server</label><input id="gns3Url" value="http://192.168.209.142" spellcheck="false" inputmode="url"></div>
     <div class="session-buttons"><button id="connect" class="primary">Connect lab</button><button id="stop" disabled>End session</button></div>
   </div>
@@ -31,7 +32,18 @@
 </aside>
 <main class="workspace">
   <div class="intro"><div><div class="eyebrow">Module 1 / Hospital testbed</div><h1>Mini-hospital traffic lab</h1><p>10 medical emulators &middot; DICOM imaging &middot; HL7 telemetry &middot; Supporting hospital traffic</p></div></div>
-  <div class="toolbar" aria-label="Traffic controls"><button data-action="normal" class="primary" disabled>Start traffic</button><button data-action="pause" disabled>Pause traffic</button><button data-action="verify" disabled>Check clinical paths</button><button id="report" class="export" disabled>Download session JSON</button></div>
+  <div class="toolbar" aria-label="Traffic controls"><button data-action="normal" class="primary" disabled>Start normal traffic</button><button data-action="pause" disabled>Pause traffic</button><button data-action="verify" disabled>Check clinical paths</button><button id="report" class="export" disabled>Download session JSON</button></div>
+  <section id="scenarioPanel" class="band" hidden aria-labelledby="scenarioTitle">
+    <div class="section-heading"><div><h2 id="scenarioTitle">Controlled scenarios</h2><p>Observe only. Start normal traffic and Module 2 monitoring before running a scenario.</p></div><span id="scenarioState" class="badge">Ready to configure</span></div>
+    <div class="toolbar">
+      <select id="scenarioChoice" aria-label="Scenario"></select>
+      <button data-action="run-scenario" class="primary" disabled>Run scenario</button>
+      <button data-action="cancel-scenario" disabled>Cancel scenario</button>
+      <button id="scenarioDownload" disabled>Download run log</button>
+    </div>
+    <p id="scenarioDetail" class="muted small" role="status"></p>
+    <ul id="scenarioCounts" class="muted small" hidden></ul>
+  </section>
   <div id="notice" class="notice" role="status" hidden></div>
   <div id="policyAlert" class="policy-alert" hidden><span>Lab restrictions are active. Some normal traffic paths may be unavailable.</span><button data-action="reset">Restore baseline paths</button></div>
   <div class="metrics"><div class="metric"><span>Captured frames</span><strong id="frames">0</strong><small id="lastPacket">No packets yet</small></div><div class="metric"><span>Medical devices observed</span><strong id="medicalCount">0 / 10</strong><small id="endpointCount">0 total endpoints</small></div><div class="metric"><span>Healthy capture streams</span><strong id="streamCount">0 / 0</strong><small id="streamDetail">Awaiting connection</small></div><div class="metric"><span>Clinical paths checked</span><strong id="verifiedCount">&mdash;</strong><small id="verifiedAt">No checks this session</small></div></div>
@@ -71,27 +83,44 @@ const devices=[
 const medicalRoles=new Set(devices.map(d=>d.role));
 const normalRoles=['workstation','pump','modality','ultrasound','monitor','lab_analyzer','mri','xray','ventilator','dialysis','ecg','vendor'];
 let current=null,busy=false,polling=false,selectedRole='modality',deviceFilter='all',lastVerification=null,lastPollError=null,pendingAction=null,backendReady=false,previousFrames=0;
+let scenarioRequest=null;
 const activityPackets=new Map();
 function message(text){$('notice').textContent=text||'';$('notice').hidden=!text;}
-function healthy(){const expected=current?.mode==='gns3'?13:1;return !!current?.mode&&current.capture.length===expected&&current.capture.every(c=>c.running&&!c.error);}
+function expectedCaptures(data){return data?.mode==='gns3'?(data.project?.capture_sources?.length||13):data?.mode==='local'?1:0;}
+function healthy(){return !!current?.mode&&current.capture.length===expectedCaptures(current)&&current.capture.every(c=>c.running&&!c.error);}
 function controls(){
   const connected=backendReady&&!!current?.mode;
   const running=normalRoles.filter(role=>current?.endpoints[role]?.running).length;
+  const active=!!current?.scenarios?.active;
   document.querySelectorAll('[data-action]').forEach(b=>{
     const name=b.dataset.action;
-    b.disabled=busy||!connected||(['normal','verify'].includes(name)&&!healthy())||(name==='normal'&&running===normalRoles.length)||(name==='pause'&&running===0);
+    b.disabled=busy||!connected||(['normal','verify','run-scenario'].includes(name)&&!healthy())||
+      (name==='normal'&&running===normalRoles.length)||(name==='pause'&&(running===0||active))||
+      (name==='verify'&&active)||(name==='run-scenario'&&(!current?.observeOnly||active||running!==normalRoles.length))||
+      (name==='cancel-scenario'&&(!active||current?.scenarios?.latest?.status==='cancelling'));
   });
   $('connect').disabled=busy||connected||!backendReady;$('stop').disabled=busy||!connected;
-  $('mode').disabled=busy||connected;$('gns3Url').disabled=busy||connected||$('mode').value!=='gns3';
+  $('mode').disabled=busy||connected;$('gns3Url').disabled=busy||connected||$('mode').value==='local';
   $('report').disabled=busy||!backendReady||!current?.monitor.frames;
+  $('scenarioPanel').hidden=$('mode').value!=='scenario';
+  $('scenarioChoice').disabled=busy||active;
+  $('scenarioDownload').disabled=active||!current?.scenarios?.latest?.end_utc;
 }
 async function action(name){
   if(busy)return;busy=true;pendingAction=name;controls();
-  const labels={'normal':'Starting traffic generators','pause':'Pausing traffic generators','verify':'Checking clinical paths','start-gns3':'Connecting the GNS3 lab','start-local':'Connecting the native lab','stop-lab':'Ending capture session','reset':'Restoring baseline paths'};
+  const labels={'normal':'Starting traffic generators','pause':'Pausing traffic generators','verify':'Checking clinical paths','start-gns3':'Connecting the GNS3 lab','start-scenario':'Connecting the GNS3 scenario profile','start-local':'Connecting the native lab','stop-lab':'Ending capture session','reset':'Restoring baseline paths','run-scenario':'Checking capture readiness','cancel-scenario':'Cancelling scenario'};
   message(labels[name]+'...');
   try{
-    const response=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:name,url:$('gns3Url').value})});
+    const body={action:name,url:$('gns3Url').value};
+    if(name==='start-scenario'){body.action='start-gns3';body.profile='scenarios-v1';}
+    if(name==='run-scenario'){
+      const selected=$('scenarioChoice').value;
+      if(scenarioRequest?.scenario_id!==selected)scenarioRequest={scenario_id:selected,request_id:crypto.randomUUID()};
+      Object.assign(body,scenarioRequest);
+    }
+    const response=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const result=await response.json();if(!response.ok)throw new Error(result.error||'Lab action failed');
+    if(name==='run-scenario'||name.startsWith('start-'))scenarioRequest=null;
     if(name.startsWith('start-'))lastVerification=null;
     if(name==='verify')lastVerification={time:Date.now()/1000,result:result.result};
     message('');
@@ -138,12 +167,12 @@ function render(data){
   for(const packet of data.monitor.packets){const key=[packet.time,packet.capture,packet.source,packet.destination,packet.sport,packet.dport,packet.length,packet.flags].join('|');activityPackets.set(key,packet);}
   for(const [key,packet] of activityPackets)if(Date.now()/1000-packet.time>30)activityPackets.delete(key);
   const m=data.monitor,connected=!!data.mode,starting=pendingAction?.startsWith('start-');
-  const good=data.capture.filter(c=>c.running&&!c.error).length,expected=connected?(data.mode==='gns3'?13:1):0;
+  const good=data.capture.filter(c=>c.running&&!c.error).length,expected=expectedCaptures(data);
   const online=connected&&data.capture.length===expected&&good===expected;
-  if(connected){$('mode').value=data.mode;if(data.project)$('gns3Url').value=data.project.server;}
+  if(connected){$('mode').value=data.observeOnly?'scenario':data.mode;if(data.project)$('gns3Url').value=data.project.server;}
   $('connectionBadge').className='badge '+(connected?(online&&!starting?'green':'amber'):'');
   $('connectionBadge').innerHTML='<i class="dot"></i>'+(starting?'Connecting':connected?(online?'Live capture':'Capture interrupted'):'Disconnected');
-  $('sessionStatus').textContent=starting?'Connecting hospital lab':connected?(data.mode==='gns3'?'GNS3 routed lab connected':'Native capture connected'):'No active capture';
+  $('sessionStatus').textContent=starting?'Connecting hospital lab':connected?(data.observeOnly?'Observe-only scenario profile':data.mode==='gns3'?'GNS3 routed lab connected':'Native capture connected'):'No active capture';
   $('project').textContent=data.project?.project_name||(data.mode==='local'?'Native isolated lab':'No project connected');
   $('packetSource').textContent=connected?(data.mode==='gns3'?'Actor-link PCAP streams / TShark':'Loopback PCAP / TShark'):'Awaiting session';
   const project=data.project;
@@ -161,6 +190,23 @@ function render(data){
   $('streamDetail').textContent=starting?'Connecting packet streams':connected?(online?'All streams healthy':'Check capture stream details'):'Awaiting connection';
   const running=normalRoles.filter(role=>data.endpoints[role]?.running).length;
   $('trafficState').textContent=connected?(running?running+' traffic generators running':age!==null&&age<15?'Generators paused / recent packets retained':'Traffic generators paused'):'Awaiting connection';
+  if(!$('scenarioChoice').options.length)for(const option of data.scenarios?.options||[])$('scenarioChoice').add(new Option(option.label,option.id));
+  const run=data.scenarios?.latest;
+  if(data.scenarios?.active&&run)$('scenarioChoice').value=run.scenario_id;
+  const now=Date.now()/1000;
+  const phase=run?.status==='running'?(now<run.start_epoch?'Scheduled':now<run.active_epoch?'Baseline':now<run.active_end_epoch?'Scenario traffic':'Recovery'):run?.status;
+  $('scenarioState').textContent=phase?phase[0].toUpperCase()+phase.slice(1):(!connected?'Connect the scenario lab':running===normalRoles.length?'Ready to check Module 2':'Start normal traffic');
+  $('scenarioDetail').textContent=run?[run.label,run.capture_scope,run.reason].filter(Boolean).join(' · '):'';
+  const counts=[];
+  for(const [role, agent] of Object.entries(run?.agents||{})){
+    const result=agent.result, name=role.replaceAll('_',' ');
+    if(result?.attempts)counts.push(name+' made '+result.attempts.length+' TCP attempts. '+result.attempts.filter(a=>a.success).length+' connected.');
+    if(typeof result?.sent==='number')counts.push(name+' sent '+result.sent+' ARP replies.');
+    else if(result?.sent)counts.push(name+' sent '+(result.sent.baseline||0)+' baseline and '+(result.sent.burst||0)+' burst messages.');
+  }
+  for(const [source, receipt] of Object.entries(run?.receiver||{}))counts.push('Receiver recorded '+receipt.baseline+' baseline and '+receipt.burst+' burst messages for '+source+'.');
+  $('scenarioCounts').replaceChildren(...counts.map(text=>{const line=document.createElement('li');line.textContent=text;return line;}));
+  $('scenarioCounts').hidden=counts.length===0;
   $('policyAlert').hidden=!connected||Object.values(data.policy||{}).every(p=>p==='normal');
   if(data.lastResult?.operation==='verify'){
     const times=Object.values(data.lastResult.result||{}).map(r=>r.time||0);
@@ -181,6 +227,14 @@ async function poll(){
 }
 document.querySelectorAll('[data-action]').forEach(b=>b.onclick=()=>action(b.dataset.action));$('connect').onclick=()=>action('start-'+$('mode').value);$('stop').onclick=()=>action('stop-lab');$('mode').onchange=controls;$('deviceSearch').oninput=renderDevices;$('packetFilter').onchange=renderPackets;document.querySelectorAll('[data-filter]').forEach(b=>b.onclick=()=>{deviceFilter=b.dataset.filter;document.querySelectorAll('[data-filter]').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));renderDevices();});$('report').onclick=async()=>{try{const response=await fetch('/api/report');if(!response.ok)throw new Error('Session report unavailable');const report=await response.json();const url=URL.createObjectURL(new Blob([JSON.stringify(report,null,2)],{type:'application/json'}));const link=document.createElement('a');link.href=url;link.download='module-1-traffic-session-'+new Date().toISOString().replace(/[:.]/g,'-')+'.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(error){message(error.message);}};if(window.matchMedia('(max-width:760px)').matches)$('sessionPanel').open=false;window.addEventListener('resize',plot);renderDevices();controls();poll();setInterval(poll,1500);
 $('mode').addEventListener('change',renderDevices);
+$('scenarioDownload').onclick=()=>{
+  const run=current?.scenarios?.latest;
+  if(!run?.end_utc)return;
+  const url=URL.createObjectURL(new Blob([JSON.stringify(run,null,2)],{type:'application/json'}));
+  const link=document.createElement('a');
+  link.href=url;link.download='scenario-'+run.run_id+'.json';link.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+};
 </script>
 </body>
 </html>
