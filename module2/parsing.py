@@ -5,6 +5,7 @@ import csv
 import hashlib
 import ipaddress
 import json
+import re
 from pathlib import Path
 from collections import defaultdict
 from bisect import bisect_left, bisect_right
@@ -12,6 +13,32 @@ from bisect import bisect_left, bisect_right
 from . import SCHEMA_VERSION
 from .sensor import FIELDS
 from .pcap import packet_fingerprints
+
+MEASUREMENT_KINDS = {
+    b"LAB_RATE": "flow_rate",
+    b"HEART_RATE": "heart_rate",
+    b"ECG_HEART_RATE": "heart_rate",
+    b"GLUCOSE": "glucose",
+    b"RESPIRATORY_RATE": "respiratory_rate",
+    b"BLOOD_FLOW": "blood_flow",
+}
+DICOM_UID = re.compile(r"(?:^|\()([0-9]+(?:\.[0-9]+)+)\)?$")
+
+
+def dicom_request_contexts(path):
+    if not path.exists():
+        return {}
+    with path.open(encoding="utf-8") as source:
+        contexts = {}
+        for frame, pdu_types, values in csv.reader(source, delimiter="\t", quotechar='"'):
+            # A frame containing different PDU types cannot safely attribute a context.
+            if set(pdu_types.split("|")) != {"0x01"}:
+                continue
+            uids = {match[1] for value in values.split("|")
+                    if (match := DICOM_UID.search(value.strip())) and len(match[1]) <= 64}
+            if uids:
+                contexts[int(frame)] = sorted(uids)
+    return contexts
 
 
 def identity(*parts):
@@ -99,15 +126,29 @@ def hl7_messages(chunks):
             if end < 0:
                 issues.append({"kind": "incomplete_mllp_message", "frame": message_frame})
                 break
-            msh = data[begin+1:end].split(b"\r", 1)[0].split(b"|")
+            segments = data[begin+1:end].split(b"\r")
+            msh = segments[0].split(b"|")
             if len(msh) < 12 or msh[0] != b"MSH":
                 issues.append({"kind": "malformed_hl7_msh", "frame": message_frame})
             else:
                 try:
-                    # Deliberately omit PID, OBX and clinical observation values.
+                    metadata = {"sender": msh[2].decode("ascii")[:80],
+                                "message_type": msh[8].decode("ascii")[:40]}
+                    if msh[8].split(b"^", 1)[0] == b"ORU":
+                        kinds = set()
+                        for segment in segments[1:]:
+                            if segment.startswith(b"OBX|"):
+                                parts = segment.split(b"|", 4)
+                                if len(parts) < 4:
+                                    continue
+                                kind = MEASUREMENT_KINDS.get(parts[3].split(b"^", 1)[0])
+                                if kind:
+                                    kinds.add(kind)
+                        if kinds:
+                            metadata["measurement_kinds"] = sorted(kinds)
+                    # Persist only the allowlisted observation kind from OBX.
                     messages.append({"frame": message_frame, "protocol": "HL7/MLLP", "parser_status": "confirmed",
-                                     "metadata": {"sender": msh[2].decode("ascii")[:80],
-                                                  "message_type": msh[8].decode("ascii")[:40]},
+                                     "metadata": metadata,
                                      "message_offset": begin,
                                      "frame_payload_offset": begin-supporting[0][0]+supporting[0][3] if supporting else None,
                                      "supporting_frames": list(dict.fromkeys(s[2] for s in spans if s[0] < end+2 and s[1] > begin))})
@@ -120,6 +161,7 @@ def hl7_messages(chunks):
 def normalize(folder, capture_id, source_id, scope):
     folder = Path(folder)
     rows, issues = packet_rows(folder / "packets.tsv")
+    request_contexts = dicom_request_contexts(folder / "dicom-contexts.tsv")
     syns, stream_rows = defaultdict(list), defaultdict(list)
     for row in rows:
         if row["tcp.stream"]:
@@ -199,6 +241,9 @@ def normalize(folder, capture_id, source_id, scope):
 
     def add(flow, row, item):
         item.update(timestamp=row["timestamp"], capture_id=capture_id, observation_id=flow["observation_id"])
+        forward = (flow["source_ip"], flow["source_port"], flow["destination_ip"], flow["destination_port"])
+        if forward[:2] != forward[2:]:
+            item["direction"] = "originator" if endpoints(row) == forward else "responder"
         item["evidence_id"] = identity(capture_id, flow["observation_id"], item["frame"], item["protocol"], item.get("message_offset"), item["metadata"])
         flow["evidence"].append(item)
 
@@ -209,9 +254,12 @@ def normalize(folder, capture_id, source_id, scope):
             if not calling or not called:
                 issues.append({"kind": "incomplete_dicom_association", "frame": row["frame"]})
             elif flow:
+                metadata = {"calling_ae": calling, "called_ae": called,
+                            "abstract_syntax": row["dicom.pctx.abss.syntax"]}
+                if row["frame"] in request_contexts:
+                    metadata["requested_abstract_syntax_uids"] = request_contexts[row["frame"]]
                 add(flow, row, {"frame": row["frame"], "protocol": "DICOM", "parser_status": "confirmed",
-                                "metadata": {"calling_ae": calling, "called_ae": called,
-                                             "abstract_syntax": row["dicom.pctx.abss.syntax"]}})
+                                "metadata": metadata})
 
     for stream, packets in stream_rows.items():
         frames = {r["frame"]: r for r in packets}
