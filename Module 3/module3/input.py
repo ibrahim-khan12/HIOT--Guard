@@ -63,6 +63,13 @@ def validate(flow):
     for e in flow.get("evidence", []):
         if not isinstance(e.get("protocol"), str) or not isinstance(e.get("metadata", {}), dict):
             raise ValueError("Invalid protocol evidence")
+        if "direction" in e and e["direction"] not in ("originator", "responder"):
+            raise ValueError("Invalid protocol evidence direction")
+        for key in ("requested_abstract_syntax_uids", "measurement_kinds"):
+            if key in e.get("metadata", {}):
+                values = e["metadata"][key]
+                if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+                    raise ValueError(f"Invalid protocol evidence field {key}")
     # Random Zeek UIDs do not constitute meaningful inventory changes.
     flow.pop("zeek_uid", None)
     return flow
