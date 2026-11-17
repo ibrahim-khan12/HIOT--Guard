@@ -99,8 +99,8 @@ class GNS3:
             self.headers["Authorization"] = "Basic " + base64.b64encode(credential.encode()).decode()
         self.manifest = None
 
-    def api(self, endpoint, data=None):
-        return request_json(self.url + "/v2" + endpoint, data, self.headers)
+    def api(self, endpoint, data=None, timeout=20):
+        return request_json(self.url + "/v2" + endpoint, data, self.headers, timeout=timeout)
 
     def attach_imported(self, project_id):
         """Register an imported portable project only after validating its full lab wiring."""
@@ -150,7 +150,7 @@ class GNS3:
         self.save()
         return self.manifest
 
-    def build(self):
+    def build(self, name="HIoT Mini Hospital Expanded", docker_properties=None):
         version = self.api("/version")
         if not str(version.get("version", "")).startswith("2.2."):
             raise ValueError("This adapter targets GNS3 2.2.x. GNS3 3.x uses a different API.")
@@ -172,7 +172,7 @@ class GNS3:
             else:
                 raise ValueError("A lab already exists for a different server. Keep its manifest; use a separate project folder for another server.")
         if not saved:
-            project = self.api("/projects", {"name": "HIoT Mini Hospital Expanded " + time.strftime("%Y%m%d-%H%M%S"), "auto_close": False})
+            project = self.api("/projects", {"name": name + " " + time.strftime("%Y%m%d-%H%M%S"), "auto_close": False})
             self.manifest = {"server": self.url, "project_id": project["project_id"], "project_name": project["name"],
                              "nodes": {}, "links": {}, "switches": {}, "gateway_links": {}, "complete": False}
         pid = self.manifest["project_id"]
@@ -186,7 +186,7 @@ class GNS3:
                     "console_type": "http", "x": NODE_POSITIONS[role][0], "y": NODE_POSITIONS[role][1],
                     "properties": {"image": IMAGE, "adapters": 3 if role == "gateway" else 1,
                                    "start_command": "python /lab/agent.py", "environment": f"LAB_ROLE={role}\nLAB_MODE=gns3",
-                                   "console_http_port": 8080},
+                                   "console_http_port": 8080, **(docker_properties or {}).get(role, {})},
                 })
                 self.manifest["nodes"][role] = node["node_id"]
                 self.save()
@@ -228,12 +228,13 @@ class GNS3:
             {"node_id": first, "adapter_number": adapter, "port_number": 0},
             {"node_id": switch, "adapter_number": 0, "port_number": port}]})
 
-    def start(self):
+    def start(self, roles=None):
         if not self.manifest.get("complete"):
             raise ValueError("The saved topology is incomplete. Finish its image/setup in GNS3; do not present it as a working lab.")
         pid = self.manifest["project_id"]
         existing = {n["node_id"]: n for n in self.api(f"/projects/{pid}/nodes")}
-        for role in ("gateway", "pacs", "ehr", *NORMAL_ROLES, "unregistered"):
+        roles = roles or ("gateway", "pacs", "ehr", *NORMAL_ROLES, "unregistered")
+        for role in roles:
             node_id = self.manifest['nodes'][role]
             if existing.get(node_id, {}).get("status") != "started":
                 self.api(f"/projects/{pid}/nodes/{node_id}/start", {})
