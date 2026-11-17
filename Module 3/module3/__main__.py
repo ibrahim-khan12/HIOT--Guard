@@ -5,7 +5,7 @@ from pathlib import Path
 
 from config import registry
 from .input import stage
-from .store import Store
+from .store import Store, recording
 from .sync import Worker
 
 
@@ -33,9 +33,22 @@ def main():
     p = sub.add_parser("export")
     p.add_argument("output")
     p.add_argument("--scope")
+    p = sub.add_parser("export-recording")
+    p.add_argument("output")
+    p.add_argument("--source-id", required=True)
+    p.add_argument("--scope", required=True)
     args = parser.parse_args()
     if args.activity_window < 1 or getattr(args, "interval", 5) < .1:
         parser.error("Activity window must be positive; polling interval must be >= 0.1 seconds")
+    if args.command == "export-recording":
+        try:
+            data = recording(Path(args.state)/"inventory.sqlite3", args.source_id, args.scope)
+            with Path(args.output).open("x", encoding="utf-8") as output:
+                json.dump(data, output, indent=2)
+                output.write("\n")
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
+        return
     mapping = json.loads(Path(args.registry).read_text()) if args.registry else registry("gns3")
     links = json.loads(Path(args.direct_links).read_text()) if args.direct_links else {}
     store = Store(Path(args.state)/"inventory.sqlite3", mapping, links, args.activity_window)
