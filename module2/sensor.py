@@ -19,6 +19,20 @@ FIELDS = ["frame.number", "frame.time_epoch", "ip.src", "ipv6.src", "ip.dst", "i
           "tcp.flags.ack", "tcp.seq_raw", "tcp.len", "tcp.payload", "dicom.assoc.ae.calling",
           "dicom.assoc.ae.called", "dicom.pctx.abss.syntax", "tcp.stream", "frame.cap_len", "frame.len",
           "eth.src", "eth.dst"]
+DICOM_CONTEXT_FIELDS = ("frame.number", "dicom.pdu.type", "dicom.pctx.abss.syntax")
+
+
+def tshark_fields(capture, fields=FIELDS, all_occurrences=False, display_filter=None):
+    args = ["-n", "-2", "-r", str(capture), "-o", "tcp.desegment_tcp_streams:TRUE",
+            "-d", "tcp.port==11112,dicom", "-T", "fields", "-E", "separator=/t",
+            "-E", "quote=d", "-E", "occurrence=a" if all_occurrences else "occurrence=f"]
+    if all_occurrences:
+        args.extend(("-E", "aggregator=|"))
+    if display_filter:
+        args.extend(("-Y", display_filter))
+    for field in fields:
+        args.extend(("-e", field))
+    return args
 BASE_IMAGE = "zeek/zeek:8.0.10"
 IMAGE = "hiot-module2-sensor:1"
 
@@ -153,11 +167,14 @@ class Sensor:
         self.sftp.mkdir(job)
         started = time.monotonic()
         image = self.image()
-        fields = " ".join("-e " + shlex.quote(field) for field in FIELDS)
+        packets = shlex.join(tshark_fields("input.pcap"))
+        contexts = shlex.join(tshark_fields("input.pcap", DICOM_CONTEXT_FIELDS, True,
+                                           "dicom.pdu.type == 1 && dicom.pctx.abss.syntax"))
         script = ("zeek -C -r input.pcap LogAscii::use_json=T >zeek.stdout 2>zeek.stderr && "
-                  "tshark -n -2 -r input.pcap -o tcp.desegment_tcp_streams:TRUE -d tcp.port==11112,dicom "
-                  "-T fields -E separator=/t -E quote=d -E occurrence=f " + fields + " >packets.tsv 2>tshark.stderr")
-        names = ("conn.log", "weird.log", "capture_loss.log", "zeek.stderr", "tshark.stderr", "packets.tsv")
+                  f"tshark {packets} >packets.tsv 2>tshark.stderr && "
+                  f"tshark {contexts} >dicom-contexts.tsv 2>>tshark.stderr")
+        names = ("conn.log", "weird.log", "capture_loss.log", "zeek.stderr", "tshark.stderr",
+                 "packets.tsv", "dicom-contexts.tsv")
         script += "; result=$?; tar -cf results.tar --ignore-failed-read " + " ".join(names) + "; exit $result"
         try:
             self.sftp.put(str(capture), job + "/input.pcap")
