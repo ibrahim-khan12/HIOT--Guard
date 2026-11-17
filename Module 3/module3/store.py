@@ -1,5 +1,5 @@
 """Transactional inventory projection of canonical monitoring observations."""
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import json
 import ipaddress
 from pathlib import Path
@@ -9,6 +9,42 @@ import time
 
 from . import SCHEMA_VERSION
 from .input import encode, identity
+
+RECORDING_SCHEMA = "hiot.discovery.recording.v1"
+
+
+def recording(path, source_id, scope):
+    """Read an internally consistent classification input from an existing inventory."""
+    uri = Path(path).resolve().as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True, timeout=30)) as db:
+        db.execute("BEGIN")
+        args = (source_id, scope)
+        sync = db.execute("SELECT revision,digest FROM sync WHERE source=? AND scope=?", args).fetchone()
+        if sync is None:
+            raise ValueError("No inventory recording for the specified source and scope")
+        assets = []
+        for (data,) in db.execute("SELECT data FROM assets WHERE source=? AND scope=? AND active=1 ORDER BY ip", args):
+            asset = json.loads(data)
+            assets.append({key: asset[key] for key in ("asset_id", "ip", "presence", "address_kind")})
+        flows = []
+        for (data,) in db.execute("SELECT data FROM flows WHERE source=? AND scope=? ORDER BY start,id", args):
+            flow = json.loads(data)
+            row = {key: flow.get(key) for key in ("flow_id", "source_ip", "destination_ip",
+                                                  "start_time", "duration", "transport",
+                                                  "origin_packets", "response_packets")}
+            row["evidence"] = []
+            for event in flow.get("evidence", []):
+                item = {key: event[key] for key in ("evidence_id", "protocol", "parser_status", "direction",
+                                                     "capture_id", "frame", "supporting_frames", "timestamp")
+                        if key in event}
+                metadata = event.get("metadata", {})
+                item["metadata"] = {key: metadata[key] for key in ("message_type", "measurement_kinds",
+                                                                   "requested_abstract_syntax_uids")
+                                    if key in metadata}
+                row["evidence"].append(item)
+            flows.append(row)
+        return {"schema_version": RECORDING_SCHEMA, "source_id": source_id, "scope": scope,
+                "revision": sync[0], "digest": sync[1], "assets": assets, "flows": flows}
 
 
 class Store:
