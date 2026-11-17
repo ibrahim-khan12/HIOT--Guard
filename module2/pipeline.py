@@ -50,6 +50,7 @@ class Pipeline:
                 flows, issues, reference = normalize(staging, capture_id, source, scope)
                 stages["normalize_seconds"] = round(time.monotonic()-phase, 4)
                 (staging / "packets.tsv").unlink(missing_ok=True)
+                (staging / "dicom-contexts.tsv").unlink(missing_ok=True)
                 revision.mkdir(exist_ok=True)
                 for artifact in staging.iterdir():
                     artifact.replace(revision / artifact.name)
