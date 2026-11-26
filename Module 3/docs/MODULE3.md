@@ -235,9 +235,36 @@ uncertainty and measurable acceptance. A unique-IP list cannot establish reply
 presence, provenance, configured/observed separation, or correction history.
 
 Module 2's strict sustained acceptance remains false in its recorded 905.6-second
-run (10/90 degraded samples). Module 3 cannot recover unseen traffic or establish
-zero loss. Fresh Linux-sensor MAC acceptance and GNS3 end-to-end testing remain a
-separately arranged live phase. No VM is started by these offline/API checks.
+run (10/90 degraded samples). The 12 November 2026 live acceptance passed for the
+pump and CT paths, including pinned Linux-sensor MAC evidence and recovery after
+interruption of the Module 2 API. See the live acceptance section of
+[the evaluation](MODULE3_EVALUATION.md) for scope, timing, and packet evidence.
+
+## Live Module 4 assessment and detector context
+
+The inventory can refresh the conservative Module 4 workflow assessment after each
+new Module 2 snapshot. Enable it for one scope and point it at the authorized local
+Module 2 capture directory. A hash and path check ties the assessment to retained
+packet bytes before decoding. Registry facts keep their own display fields.
+
+```powershell
+python -m module3 --state runs/module3-live serve --scope <scope> --live-assessment-root <module2-capture-root>
+python "Module 3/tools/verify_live_assessment.py" --output runs/module4-live-demo/handoff.json
+```
+
+For the FYP demo, add `--module4-evaluation "Module 4/docs/final-evaluation-scorecard.json"`
+to `serve`. The endpoint view shows the saved held-out macro F1 for each cohort and
+the additional decisions made by the model fallback. The assessment above it uses
+the configured live or recorded workflow policy.
+
+The read-only loopback route `GET /api/assets/{asset_id}/module4-handoff` returns
+`hiot.module4.endpoint-context.v1`. A consumer can use the category, workflows,
+reason, and packet references when `assessment_state` is `current` and the revision
+and digest match its inventory snapshot. A pending or unavailable response carries
+no current category, workflow, or packet evidence. Category `unknown` is a valid
+current decision. The verification command exercises a detector-side contract
+fixture against the actual local HTTP services. A downstream Module 5 application
+must validate the same contract when it is integrated.
 
 ## Source organization
 

@@ -1,0 +1,47 @@
+{
+  "version": "module4-final-v1",
+  "primary_window_seconds": 120,
+  "selected": {
+    "candidate": "hgb_semantics"
+  },
+  "cohorts": {
+    "familiar": {
+      "sessions": 10,
+      "windows": {
+        "120": {
+          "methods": {
+            "updated_rules": {
+              "macro_f1": 0.7
+            },
+            "selected_fallback": {
+              "macro_f1": 0.7
+            }
+          },
+          "rule_abstention_increment": {
+            "additional_correct": 0,
+            "additional_wrong": 0
+          }
+        }
+      }
+    },
+    "transfer": {
+      "sessions": 20,
+      "windows": {
+        "120": {
+          "methods": {
+            "updated_rules": {
+              "macro_f1": 0.7
+            },
+            "selected_fallback": {
+              "macro_f1": 0.7
+            }
+          },
+          "rule_abstention_increment": {
+            "additional_correct": 0,
+            "additional_wrong": 0
+          }
+        }
+      }
+    }
+  }
+}

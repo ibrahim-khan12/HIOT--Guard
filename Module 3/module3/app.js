@@ -22,6 +22,8 @@ function node(type,cls,text){const n=document.createElement(type);if(cls)n.class
 function icon(key){const s=document.createElementNS('http://www.w3.org/2000/svg','svg');for(const [k,v] of Object.entries({viewBox:'0 0 20 20',fill:'none',stroke:'currentColor','stroke-width':'1.3','stroke-linecap':'round','stroke-linejoin':'round','aria-hidden':'true'}))s.setAttribute(k,v);s.innerHTML=icons[key]||icons.endpoint;return s;}
 function tag(text,tone=''){return node('span','tag '+tone,text);}
 function human(value){
+ const assessment={unknown:'Unknown',ct_storage:'CT image storage',mr_storage:'MR image storage',ultrasound_storage:'Ultrasound image storage',dx_storage:'Digital X-ray image storage',flow_rate_reporting:'Flow-rate reporting',heart_rate_reporting:'Heart-rate reporting',conservative_workflow_rules:'Conservative workflow rules',workflow_does_not_establish_physical_device:'This workflow does not uniquely identify the physical device.',insufficient_workflow_evidence:'Insufficient readable workflow evidence.',insufficient_observation_coverage:'The recording does not cover the requested observation period.',inventory_changed_since_classification:'The inventory changed after this assessment.',capture_provenance_mismatch:'The supporting capture does not match this inventory.',awaiting_current_assessment:'Waiting for the latest capture assessment.',no_verified_capture_for_endpoint:'No verified capture is available for this endpoint.',assessment_refresh_failed:'The latest assessment could not be retrieved.'};
+ if(assessment[value])return assessment[value];
  const map={observed_transmitting:'Transmitting',addressed_only:'Addressed only',unresolved:'Unresolved',multiple_exchange_labels_review_context:'Multiple exchange labels',multiple_macs_on_configured_direct_link:'Multiple MACs on a direct link',multiple_configured_registry_records:'Multiple registry records',configured_direct_link:'Configured direct link',unresolved_link_observation:'Link observation only',physical_device_identity:'Physical device identity',device_category:'Device category',mac_not_available:'MAC address not available',not_recently_observed:'Outside recency window',recently_observed:'Within recency window',unicast_address:'Unicast address',multicast_group:'Multicast group',unspecified:'Unspecified address'};
  return map[value]||String(value||'Not available').replaceAll('_',' ');
 }
@@ -88,11 +90,36 @@ function renderProfile(a){
  $('configured').replaceChildren();
  if(!a.configured.records.length)$('configured').append(node('p','identity-note','No configured registry match. This endpoint remains unregistered; no role or clinical criticality has been inferred.'));
  else{a.configured.records.forEach(r=>{const item=node('div','registry-entry');item.append(facts([['Configured name',r.name||r.label||human(r.role)],['Role',human(r.role)],['Network zone',human(r.zone)],['Clinical criticality',r.critical===true?'Safety-critical (configured)':r.critical===false?'Noncritical (configured)':'Not configured'],['Match method','IP-based registry association']]));$('configured').append(item);});$('configured').append(node('p','fact-note','Supplied by the authorized registry. An IP match is not authenticated device identity.'));}
- const uncertain=node('div','identity-note');uncertain.append(node('strong','','Physical identity is unverified'),node('p','','Device category and model have not been established by this module. Observed protocols and configured labels remain separate.'));$('unknown').replaceChildren(uncertain);
+ const uncertain=node('div','identity-note');uncertain.append(node('strong','','Physical identity is unverified'),node('p','','Observed protocols and configured labels remain separate.'));
+ const assessment=node('div');assessment.id='module4Assessment';
+ $('unknown').replaceChildren(uncertain,assessment);renderAssessment(a.classification);
  if(a.review_findings.length){$('unknown').append(node('div','divider'),node('h3','subhead','Context to review'));a.review_findings.forEach(f=>$('unknown').append(node('p','fact-note',human(f)+'. Inspect the supporting exchange before drawing a conclusion.')));}
  $('macFacts').replaceChildren();if(!a.mac_observations.length)$('macFacts').append(node('p','muted','No MAC evidence is available in these records.'),node('p','fact-note','Older monitoring exports may not contain Ethernet fields. Missing data is kept unknown.'));
  else{a.mac_observations.forEach(m=>{const item=node('div','registry-entry');item.append(facts([['MAC address',m.mac,true],['Observation source',m.observation_source],['Association',human(m.association)]]));$('macFacts').append(item);});$('macFacts').append(node('p','fact-note','A routed Ethernet address may identify a next hop. Only explicitly configured direct-link context supports a device association.'));}
  $('commEndpoint').textContent=endpointName(a)+' · '+a.ip;$('commSummary').replaceChildren();for(const [label,value] of [['recorded flows',a.flow_count],['unique peers',a.peer_count],['evidence-backed protocols',a.protocols.length]]){const span=node('span');span.append(node('b','',number(value)),document.createTextNode(label));$('commSummary').append(span);}
+}
+function renderAssessment(assessment){
+ const slot=$('module4Assessment');slot.replaceChildren();
+ if(!assessment)return;
+ const box=node('div','registry-entry');box.append(node('h3','subhead','Module 4 assessment'));
+ if(assessment.state==='current'){
+  box.append(facts([['Device category',human(assessment.category)],['Observed workflow',(assessment.workflows||[]).map(human).join(', ')||'Insufficient evidence'],['Reason',human(assessment.reason)],['Observation',assessment.observed_seconds+' / '+assessment.window_seconds+' seconds'],['Method',human(assessment.method)],['Version',assessment.schema_version]]));
+  box.append(technical(assessment.evidence,'Supporting packet references'));
+ }else{
+  box.append(node('p','fact-note',human(assessment.reason)));
+ }
+ slot.append(box);
+}
+async function refreshAssessment(){
+ if(currentView!=='detail'||!selectedAsset||selectedAsset.asset_id!==asset)return;
+ const ticket=selectionTicket;
+ let latest;
+ try{latest=(await get('/api/assets/'+asset)).classification;}
+ catch(error){if(!selectedAsset.classification)throw error;latest={state:'unavailable',reason:'assessment_refresh_failed'};}
+ if(ticket!==selectionTicket||currentView!=='detail')return;
+ if(JSON.stringify(selectedAsset.classification)!==JSON.stringify(latest)){
+  selectedAsset.classification=latest;renderAssessment(latest);
+ }
 }
 async function select(id){
  const ticket=++selectionTicket;asset=id;commOffset=0;historyOffset=0;$('commSearch').value='';$('detailContent').hidden=true;$('detailEmpty').hidden=false;$('detailEmpty').replaceChildren(empty('Loading endpoint profile','Retrieving stored observations and evidence…'));show('detail');
@@ -152,5 +179,24 @@ $('historyPrev').addEventListener('click',safe(async()=>{historyOffset=Math.max(
 $('closeEvidence').addEventListener('click',()=>$('evidenceDialog').close());
 $('evidenceDialog').addEventListener('click',e=>{if(e.target===$('evidenceDialog')&&e.clientX<$('evidenceDialog').getBoundingClientRect().left)$('evidenceDialog').close();});
 $('export').addEventListener('click',()=>{const a=document.createElement('a');a.href='/api/export.jsonl?'+filters();a.download='hiot-guard-inventory.jsonl';a.click();});
+async function loadEvaluation(){
+ const result=await get('/api/module4-evaluation');
+ if(!result)return;
+ $('evaluationContext').textContent='Held-out GNS3 results at '+number(result.window_seconds)+' seconds.';
+ for(const cohort of result.cohorts){
+  const row=node('tr');
+  const name=node('th','evaluation-cohort',cohort.name);
+  name.scope='row';
+  name.append(node('span','cell-sub',number(cohort.sessions)+' sessions'));
+  row.append(name,node('td','cell-number',cohort.rules_f1.toFixed(3)),node('td','cell-number',cohort.fallback_f1.toFixed(3)));
+  $('evaluationRows').append(row);
+ }
+ const correct=result.cohorts.reduce((total,cohort)=>total+cohort.additional_correct,0);
+ const wrong=result.cohorts.reduce((total,cohort)=>total+cohort.additional_wrong,0);
+ $('evaluationModel').textContent='Selected fallback uses '+result.model.toLowerCase()+' with '+result.features.toLowerCase()+'.';
+ $('evaluationGain').textContent='After the study rules abstained, the fallback added '+number(correct)+' correct and '+number(wrong)+' incorrect decisions across both cohorts.';
+ $('module4Evaluation').hidden=false;
+}
 renderComms();safe(async()=>{await health();await inventory();})();
-setInterval(safe(async()=>{await health(currentView==='inventory');if(currentView==='inventory')await inventory();}),15000);
+loadEvaluation().catch(()=>{});
+setInterval(safe(async()=>{await Promise.all([health(currentView==='inventory'),refreshAssessment()]);if(currentView==='inventory')await inventory();}),15000);

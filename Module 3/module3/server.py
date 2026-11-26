@@ -4,8 +4,10 @@ import json
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from .classification import handoff, inventory_version
 
-def handler(store):
+
+def handler(store, classification=None, evaluation=None):
     class API(BaseHTTPRequestHandler):
         def send(self, code, data, content_type="application/json"):
             raw = data if isinstance(data, bytes) else json.dumps(data).encode()
@@ -38,6 +40,8 @@ def handler(store):
                     return self.send(200, {"app": "hiot-module3"})
                 if parsed.path == "/api/status":
                     return self.send(200, store.status())
+                if parsed.path == "/api/module4-evaluation":
+                    return self.send(200, evaluation)
                 if parsed.path == "/api/assets":
                     return self.send(200, store.assets(**filters, limit=limit, offset=offset))
                 if parsed.path == "/api/events":
@@ -56,8 +60,14 @@ def handler(store):
                     return
                 parts = parsed.path.strip("/").split("/")
                 if len(parts) in (3, 4) and parts[:2] == ["api", "assets"]:
-                    if len(parts) == 3:
-                        data = store.asset(parts[2])
+                    if len(parts) == 3 or parts[3] == "module4-handoff":
+                        with store.connect() as db:
+                            db.execute("BEGIN")
+                            data = store.asset(parts[2], db=db)
+                            if data is not None and classification is not None:
+                                data["classification"] = classification.for_asset(store, data, db=db)
+                            if data is not None and len(parts) == 4:
+                                data = handoff(data, inventory_version(db, data["source_id"], data["scope"]))
                     elif parts[3] in ("communications", "evidence"):
                         data = store.related(parts[2], parts[3] == "evidence", limit, offset)
                     else:
@@ -74,16 +84,21 @@ def handler(store):
     return API
 
 
-def serve(store, worker=None, port=8879):
-    server = ThreadingHTTPServer(("127.0.0.1", port), handler(store))
-    if worker:
-        worker.start()
-    print(f"Module 3 inventory: http://127.0.0.1:{port}/", flush=True)
+def serve(store, worker=None, port=8879, classification=None, evaluation=None):
+    server = ThreadingHTTPServer(("127.0.0.1", port), handler(store, classification, evaluation))
+    assessment_worker = classification if hasattr(classification, "start") else None
     try:
+        if worker:
+            worker.start()
+        if assessment_worker:
+            assessment_worker.start()
+        print(f"Module 3 inventory: http://127.0.0.1:{port}/", flush=True)
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        if assessment_worker:
+            assessment_worker.stop()
         if worker:
             worker.stop()
         server.server_close()

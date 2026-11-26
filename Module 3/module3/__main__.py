@@ -1,5 +1,6 @@
 import argparse
 import json
+import shutil
 import time
 from pathlib import Path
 
@@ -24,6 +25,13 @@ def main():
             p.add_argument("--port", type=int, default=8879)
             p.add_argument("--interval", type=float, default=5)
             p.add_argument("--offline", action="store_true")
+            assessment = p.add_mutually_exclusive_group()
+            assessment.add_argument("--classification", help="Revision-bound Module 4 workflow projection JSON")
+            assessment.add_argument("--live-assessment-root", type=Path,
+                                    help="Read retained captures from this directory for one explicit --scope")
+            p.add_argument("--assessment-tshark", help="TShark executable for live assessment")
+            p.add_argument("--assessment-window", type=int, choices=(10, 30, 60, 120), default=120)
+            p.add_argument("--module4-evaluation", type=Path, help="Saved Module 4 final-study report.json to display")
     p = sub.add_parser("import")
     p.add_argument("input")
     p.add_argument("--legacy", action="store_true", help="Import canonical monitoring JSONL rather than framed snapshot")
@@ -66,7 +74,26 @@ def main():
         print(json.dumps(Worker(store, args.upstream, args.scope).once(), indent=2))
     else:
         from .server import serve
-        serve(store, None if args.offline else Worker(store, args.upstream, args.scope, args.interval), args.port)
+        from .classification import Classification, LiveClassification
+        from .evaluation import load_evaluation
+        try:
+            evaluation = load_evaluation(args.module4_evaluation) if args.module4_evaluation else None
+        except (OSError, ValueError) as error:
+            parser.error(f"Cannot load Module 4 evaluation: {error}")
+        classification = Classification(args.classification) if args.classification else None
+        if args.live_assessment_root:
+            if not args.scope or len(args.scope) != 1:
+                parser.error("--live-assessment-root requires one explicit --scope")
+            tshark = shutil.which(args.assessment_tshark or "tshark")
+            if tshark is None:
+                parser.error("TShark is required for live assessment; use --assessment-tshark to specify its path")
+            try:
+                classification = LiveClassification(store, args.scope[0], args.live_assessment_root, tshark,
+                                                    args.assessment_window, args.interval)
+            except (OSError, ValueError, ImportError) as error:
+                parser.error(str(error))
+        worker = None if args.offline else Worker(store, args.upstream, args.scope, args.interval)
+        serve(store, worker, args.port, classification, evaluation=evaluation)
 
 
 if __name__ == "__main__":

@@ -130,12 +130,36 @@ samples are unusable. The helper was corrected and the final experiment records
 valid working-memory samples. Preserve the preliminary run rather than silently
 replacing its observations.
 
-No GNS3 VM, Kali VM, or FortiGate VM was started or modified. Fresh live hospital
-acceptance remains a separately arranged phase. Module 2's historical strict
+The offline experiments above ran without starting a VM. Module 2's historical strict
 sustained run failed, with 10/90 degraded samples, despite p95 snapshot freshness
 of 20.54 seconds. Module 3 inherits coverage/freshness limitations and cannot claim
 zero packet loss. Offline evidence does not demonstrate physical medical-device
 identity, real-patient safety, or hospital-scale performance.
+
+## Live acceptance — 12 November 2026
+
+All six checks passed in the GNS3 hospital lab. The pump received an HL7
+acknowledgment from the EHR. The CT emulator completed DICOM C-ECHO and C-STORE
+against PACS. Module 2 used pinned Zeek 8.0.10 and TShark 4.4.19. Module 3
+ingested both fresh flows with protocol frame references and link-layer evidence.
+The test checked the retained PCAP hashes, located each cited frame, and
+matched each source MAC against the cited Ethernet frame.
+
+The Module 3 API showed the fresh flows within about 13 seconds of flow start
+in this run. During the Module 2 API interruption, Module 3 reported the feed
+unavailable and retained the pump and CT entries. Both emulators completed a
+second exchange during the outage. Module 3 showed the new flow IDs within
+6.15 seconds after the API returned. The collector reported 13 of 13 active
+readers at the final sample.
+
+The interruption tested the Module 2 to Module 3 API handoff while capture
+continued. This short run covers the two clinical paths, packet provenance,
+and inventory recovery. The historical sustained-health result above still applies.
+The local evidence is in runs/module3-live-20261112-233505/report.json, with
+the inventory database, monitoring database, and retained captures in the same
+run directory. A preliminary run exercised both clinical paths successfully,
+but the test script checked the wrong response field. The corrected run used a
+fresh capture scope.
 
 ## Requirement-to-evidence map
 

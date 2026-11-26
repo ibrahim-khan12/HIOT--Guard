@@ -1,5 +1,5 @@
 """Transactional inventory projection of canonical monitoring observations."""
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 import json
 import ipaddress
 from pathlib import Path
@@ -242,10 +242,10 @@ class Store:
         return {"schema_version": SCHEMA_VERSION, "records": rows, "total": total, "offset": offset,
                 "next_offset": offset+len(rows) if limit >= 0 and offset+len(rows)<total else None}
 
-    def asset(self, key):
-        with self.connect() as db:
-            row = db.execute("SELECT data FROM assets WHERE id=?", (key,)).fetchone()
-            return self._activity(db, json.loads(row[0])) if row else None
+    def asset(self, key, db=None):
+        with (nullcontext(db) if db is not None else self.connect()) as reader:
+            row = reader.execute("SELECT data FROM assets WHERE id=?", (key,)).fetchone()
+            return self._activity(reader, json.loads(row[0])) if row else None
 
     def related(self, key, evidence=False, limit=50, offset=0):
         with self.connect() as db:
