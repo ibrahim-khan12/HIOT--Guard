@@ -5,6 +5,40 @@ or `unknown`. The categories are infusion pump, CT, MRI, ultrasound, portable X-
 bedside monitor, lab analyzer, ventilator, dialysis machine and ECG monitor.
 Attack detection belongs to Module 5.
 
+The [final evaluation](docs/FINAL_EVALUATION_RESULTS.md) contains the verified
+90-session results, model comparison, and live inventory demo.
+
+The [26 November FYP evaluation readiness review](docs/FYP_EVALUATION_READINESS.md)
+records the completion estimate, what to demonstrate, and the remaining evaluation work.
+
+## Forwarding experiment
+
+The [paired capture experiment](docs/FORWARDING_EXPERIMENT.md) uses a real HL7 relay
+and DICOM forwarding workstation in GNS3. It compares attribution from the receiver
+side with attribution from both links and records the remaining category ambiguities.
+
+## Independent-stack pilot — 24 November 2026
+
+The [pilot results and stage status](docs/STAGE2_PILOT_RESULTS.md) document new
+Python and HAPI/DCMTK recordings, packet-prefix transaction evidence, the frozen
+baseline's forwarding errors, public-data admission decisions, and the optional
+Module 3 workflow assessment. The 90-session expansion and new model training
+have **not** been completed: the pilot leaves the physical-device evidence gate
+unresolved. Historical models and scores below retain their original lab scope.
+
+## Stage 1 evidence audit — 23 November 2026
+
+The [Stage 1 audit](docs/STAGE1_EVIDENCE_AUDIT.md) reviews all ten category
+assumptions, validates the 52-session corpus and 780 capture files, and reproduces
+13 in-memory diagnostics. It identifies local-code coverage, acknowledgement,
+persistent-connection and DICOM negotiation limits, plus unsupported physical-device
+distinctions. Its outcome is a bounded independent-stack pilot before dataset
+expansion. No production parser, classifier, model or threshold changed.
+
+Reproduce the audit with
+`python "Module 4/tools/audit_stage1.py" --output runs/module4-stage1-repro/audit.json`.
+The audit requires the original local recordings and frozen model artifacts.
+
 ## Reproduce the experiment
 
 From the repository root, install `requirements-module2.txt` and
@@ -260,8 +294,14 @@ See [CICIOMT2024.md](CICIOMT2024.md) for the separate feature comparison and
 the importer for a downloaded public profiling sample. On the same twelve
 test sessions, statistics alone scored macro F1 0.633 and combined features
 scored 0.838, compared with 0.870 for the existing larger raw forest. The
-comparison did not replace the existing selected policy. Actual CICIoMT2024
-files remain pending the publisher's registration/download process.
+comparison did not replace the existing selected policy. A separate public
+pilot on 17 November imported two supplied Power captures. The publisher MACs
+verified the Blink camera and SINGCALL SOS targets, and all methods returned
+`unknown` for both. These are two out-of-scope rejection examples rather than
+a ten-category public evaluation. A statistics-only hospital-category call
+on an unlabelled background endpoint is preserved in the report. See
+`runs/module4-ciciomt2024-pilot-20261117/evaluation/REPORT.md` and
+[the public-data notes](docs/CICIOMT2024.md) for reproduction and limitations.
 
 
 ## Repository layout
@@ -281,3 +321,46 @@ Shared observation and export changes live with Modules 2 and 3.
 python -m pip install -r "Module 4/requirements-module4.txt"
 python -m unittest discover -s "Module 4/tests" -v
 ```
+
+## Complete IoT Sentinel external evaluation
+
+The supplied IoT Sentinel ZIP is evaluated separately from the ten-category GNS3
+study. The full audit covers 550 original setup captures in 31 publisher folders,
+including the nine-capture pilot. Twenty-nine observed publisher MAC groups
+account for two pairs of shared-MAC folders. Repeated setups and indirect gateway
+traffic are not counted as independent physical-device identifications.
+
+See [IOT_SENTINEL.md](docs/IOT_SENTINEL.md) for the identity review, exact metric
+definitions, pilot results and full-run reproduction. The full evaluator has
+`audit` and `evaluate` commands, with verified resume support:
+
+```powershell
+python -m module4.sentinel_full audit `
+  --archive 'C:\Users\Ibrahim Khan\Downloads\captures_IoT_Sentinel.zip' `
+  --root runs/sentinel-full-repro
+python -m module4.sentinel_full evaluate --root runs/sentinel-full-repro
+python -m module4.sentinel_full evaluate --root runs/sentinel-full-repro --resume
+```
+
+The run directory contains the frozen manifest, artifact/source hashes,
+per-capture attempts, retained canonical imports and versioned reports. This
+compares unknown rejection and false hospital-category assignments without
+training, tuning or promoting a model. Missing targets are never reported as
+successful rejections, and background endpoint predictions stay outside reviewed
+target metrics. Medical macro F1 and the CCP fallback contribution remain in the
+separate GNS3 study above.
+
+The completed full run on 18 November accounted for all 550 captures: zero
+partial/unevaluable captures and all 924 reviewed target-address entries present.
+Rules, the existing forest, selected fallback, protocol-evidence and combined
+models returned unknown for every setup. The statistics-only candidate correctly
+rejected 357 setups and made medical assignments in 193 setups (272 target-address
+errors); its equal-MAC-group rejection mean was 58.6%. No candidate was promoted.
+The original pilot predictions reproduced exactly, and all model/threshold hashes
+stayed fixed. Full results and per-device details are in
+`runs/sentinel-full-20261117/reports/v001/REPORT.md` and the adjacent JSON reports.
+The existing GNS3 medical macro F1 scores remain separate from these consumer-device
+rejection results.
+All 44 Module 4 tests passed. The full-run resume check reused all 550 verified
+results with zero new imports and identical metrics; the run-root
+`verification.json` records the final integrity and capture-accounting checks.
