@@ -83,10 +83,10 @@ class Module2Tests(unittest.TestCase):
 
     def test_pcap_timestamp_fraction_must_match_file_precision(self):
         formats = (
-            ("little-microsecond", b"\\xd4\\xc3\\xb2\\xa1", "<", 1_000_000),
-            ("big-microsecond", b"\\xa1\\xb2\\xc3\\xd4", ">", 1_000_000),
-            ("little-nanosecond", b"\\x4d\\x3c\\xb2\\xa1", "<", 1_000_000_000),
-            ("big-nanosecond", b"\\xa1\\xb2\\x3c\\x4d", ">", 1_000_000_000),
+            ("little-microsecond", b"\xd4\xc3\xb2\xa1", "<", 1_000_000),
+            ("big-microsecond", b"\xa1\xb2\xc3\xd4", ">", 1_000_000),
+            ("little-nanosecond", b"\x4d\x3c\xb2\xa1", "<", 1_000_000_000),
+            ("big-nanosecond", b"\xa1\xb2\x3c\x4d", ">", 1_000_000_000),
         )
         for name, magic, endian, precision in formats:
             with self.subTest(format=name):
