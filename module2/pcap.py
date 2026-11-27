@@ -23,7 +23,9 @@ def complete_pcap(data, allow_partial=False):
         if offset + 16 + captured > len(data):
             break
         sec, fraction = struct.unpack_from(endian + "II", data, offset)
-        precision = 1e9 if data[:4] in (b"\x4d\x3c\xb2\xa1", b"\xa1\xb2\x3c\x4d") else 1e6
+        precision = 1_000_000_000 if data[:4] in (b"\x4d\x3c\xb2\xa1", b"\xa1\xb2\x3c\x4d") else 1_000_000
+        if fraction >= precision:
+            raise ValueError("Invalid PCAP packet timestamp fraction")
         timestamp = sec + fraction / precision
         first_time = timestamp if first_time is None else min(first_time, timestamp)
         last_time = timestamp if last_time is None else max(last_time, timestamp)
