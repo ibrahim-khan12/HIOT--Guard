@@ -87,7 +87,7 @@ def write_overlapping_connection_fixture(folder, include_syn=True):
     rows.extend((packet(frame, 100.06, 0, 124, HL7),
                  packet(frame + 1, 100.07, 1, 457, HL7.replace(b"ORU^R01", b"ADT^A01"))))
     with (Path(folder) / "packets.tsv").open("w", newline="") as out:
-        writer = csv.writer(out, delimiter="\\t", quotechar='"', quoting=csv.QUOTE_ALL)
+        writer = csv.writer(out, delimiter="\t", quotechar='"', quoting=csv.QUOTE_ALL)
         writer.writerows([[row[name] for name in FIELDS] for row in rows])
 
     common = {"id.orig_h": "10.77.20.20", "id.orig_p": 40000,
@@ -98,7 +98,7 @@ def write_overlapping_connection_fixture(folder, include_syn=True):
         {**common, "ts": 100.0, "uid": "zeek-flow-0"},
         {**common, "ts": 100.05, "uid": "zeek-flow-1"},
     ]
-    (Path(folder) / "conn.log").write_text("".join(json.dumps(item) + "\\n" for item in connections))
+    (Path(folder) / "conn.log").write_text("".join(json.dumps(item) + "\n" for item in connections))
 
 
 class Module2Tests(unittest.TestCase):
