@@ -193,7 +193,32 @@ def normalize(folder, capture_id, source_id, scope):
         reverse = (key[2], key[3], key[0], key[1])
         candidates = [f for f in by_endpoints[key] + by_endpoints[reverse]
                       if f["start_time"] - .25 <= row["timestamp"] <= f["start_time"] + (f["duration"] or 0) + 2]
-        return min(candidates, key=lambda f: abs(f["start_time"] - row["timestamp"])) if candidates else None
+        if not candidates:
+            return None
+
+        # TShark and Zeek analyze the same capture, so tcp.stream is a stronger
+        # within-capture connection identity than a nearest-start-time heuristic.
+        stream = row.get("tcp.stream", "").strip()
+        if stream:
+            matches = [f for f in candidates if f.get("tcp_stream") == stream]
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                issues.append({"kind": "ambiguous_tcp_flow_correlation", "frame": row["frame"],
+                               "tcp_stream": stream, "candidate_count": len(matches)})
+                return None
+            if any(f.get("tcp_stream") is not None for f in candidates):
+                issues.append({"kind": "tcp_stream_correlation_mismatch", "frame": row["frame"],
+                               "tcp_stream": stream, "candidate_count": len(candidates)})
+                return None
+
+        # If stream identity is unavailable, only use the tuple/time fallback
+        # when exactly one flow is possible. Never choose a nearest flow silently.
+        if len(candidates) == 1:
+            return candidates[0]
+        issues.append({"kind": "ambiguous_tcp_flow_correlation", "frame": row["frame"],
+                       "tcp_stream": stream or None, "candidate_count": len(candidates)})
+        return None
 
     def add(flow, row, item):
         item.update(timestamp=row["timestamp"], capture_id=capture_id, observation_id=flow["observation_id"])

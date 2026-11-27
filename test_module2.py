@@ -61,6 +61,46 @@ def fixture(folder, protocol="hl7", flag="True"):
     (folder / "conn.log").write_text(json.dumps(conn)+"\n")
 
 
+def write_overlapping_connection_fixture(folder, include_syn=True):
+    """Two same-tuple TCP connections whose Zeek time windows overlap."""
+    rows = []
+
+    def packet(frame, timestamp, stream, seq, payload=b"", syn=False):
+        fields = {name: "" for name in FIELDS}
+        fields.update({
+            "frame.number": str(frame), "frame.time_epoch": str(timestamp),
+            "ip.src": "10.77.20.20", "ip.dst": "10.77.30.40",
+            "tcp.srcport": "40000", "tcp.dstport": "2575",
+            "tcp.flags.syn": "True" if syn else "False",
+            "tcp.flags.ack": "False" if syn else "True",
+            "tcp.seq_raw": str(seq), "tcp.len": str(len(payload)),
+            "tcp.payload": payload.hex(), "tcp.stream": str(stream),
+            "frame.cap_len": str(60 + len(payload)), "frame.len": str(60 + len(payload)),
+        })
+        return fields
+
+    frame = 1
+    if include_syn:
+        rows.extend((packet(frame, 100.0, 0, 123, syn=True),
+                     packet(frame + 1, 100.05, 1, 456, syn=True)))
+        frame += 2
+    rows.extend((packet(frame, 100.06, 0, 124, HL7),
+                 packet(frame + 1, 100.07, 1, 457, HL7.replace(b"ORU^R01", b"ADT^A01"))))
+    with (Path(folder) / "packets.tsv").open("w", newline="") as out:
+        writer = csv.writer(out, delimiter="\t", quotechar='"', quoting=csv.QUOTE_ALL)
+        writer.writerows([[row[name] for name in FIELDS] for row in rows])
+
+    common = {"id.orig_h": "10.77.20.20", "id.orig_p": 40000,
+              "id.resp_h": "10.77.30.40", "id.resp_p": 2575, "proto": "tcp",
+              "duration": 10, "conn_state": "SF", "orig_pkts": 2, "resp_pkts": 0,
+              "orig_bytes": 100, "resp_bytes": 0}
+    connections = [
+        {**common, "ts": 100.0, "uid": "zeek-flow-0"},
+        {**common, "ts": 100.05, "uid": "zeek-flow-1"},
+    ]
+    (Path(folder) / "conn.log").write_text("".join(json.dumps(item) + "\n" for item in connections))
+
+
 class Module2Tests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -189,6 +229,27 @@ class Module2Tests(unittest.TestCase):
         self.assertEqual(event["metadata"]["calling_ae"], "LAB_CT")
         self.assertEqual(event["frame"], 2)
         self.assertEqual(event["capture_id"], "one")
+
+    def test_tcp_stream_disambiguates_overlapping_same_tuple_connections(self):
+        write_overlapping_connection_fixture(self.root)
+        flows, issues, _ = normalize(self.root, "overlap", "pump", "test")
+
+        by_stream = {flow["tcp_stream"]: flow for flow in flows}
+        self.assertEqual(set(by_stream), {"0", "1"})
+        self.assertEqual(by_stream["0"]["evidence"][0]["metadata"]["message_type"], "ORU^R01")
+        self.assertEqual(by_stream["1"]["evidence"][0]["metadata"]["message_type"], "ADT^A01")
+        self.assertFalse([issue for issue in issues if issue["kind"] in (
+            "ambiguous_tcp_flow_correlation", "tcp_stream_correlation_mismatch"
+        )])
+
+    def test_ambiguous_same_tuple_evidence_without_syn_is_not_guessed(self):
+        write_overlapping_connection_fixture(self.root, include_syn=False)
+        flows, issues, _ = normalize(self.root, "overlap-no-syn", "pump", "test")
+
+        self.assertTrue(all(not flow["evidence"] for flow in flows))
+        ambiguous = [issue for issue in issues if issue["kind"] == "ambiguous_tcp_flow_correlation"]
+        self.assertEqual(len(ambiguous), 2)
+        self.assertTrue(all(issue["candidate_count"] == 2 for issue in ambiguous))
 
     def test_tcp_medical_evidence_never_attaches_to_same_tuple_udp(self):
         fixture(self.root)
