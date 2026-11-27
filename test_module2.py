@@ -81,6 +81,26 @@ class Module2Tests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 complete_pcap(raw)
 
+    def test_pcap_timestamp_fraction_must_match_file_precision(self):
+        formats = (
+            ("little-microsecond", b"\\xd4\\xc3\\xb2\\xa1", "<", 1_000_000),
+            ("big-microsecond", b"\\xa1\\xb2\\xc3\\xd4", ">", 1_000_000),
+            ("little-nanosecond", b"\\x4d\\x3c\\xb2\\xa1", "<", 1_000_000_000),
+            ("big-nanosecond", b"\\xa1\\xb2\\x3c\\x4d", ">", 1_000_000_000),
+        )
+        for name, magic, endian, precision in formats:
+            with self.subTest(format=name):
+                header = magic + struct.pack(endian + "HHIIII", 2, 4, 0, 0, 65535, 1)
+                valid_packet = struct.pack(endian + "IIII", 42, precision - 1, 4, 4) + b"test"
+                _, info = complete_pcap(header + valid_packet)
+                self.assertEqual(info["frames"], 1)
+                self.assertGreater(info["first_packet_time"], 42)
+                self.assertLess(info["first_packet_time"], 43)
+
+                invalid_packet = struct.pack(endian + "IIII", 42, precision, 4, 4) + b"test"
+                with self.assertRaisesRegex(ValueError, "timestamp fraction"):
+                    complete_pcap(header + invalid_packet)
+
     def test_partial_tail_allowed_only_for_live_snapshot(self):
         raw = HEADER+PACKET+PACKET[:18]
         with self.assertRaisesRegex(ValueError, "Truncated"):
